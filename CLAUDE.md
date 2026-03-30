@@ -37,9 +37,8 @@ cp .env.example .env    # First time only
 ## Common Commands
 
 ```bash
-# Migrations (via pfv script or directly)
-./pfv migrate
-docker compose exec backend alembic revision -m "description"  # Create new migration
+# Create a new migration
+docker compose exec backend alembic revision -m "description"
 
 # Rebuild after dependency changes
 docker compose up --build -d backend
@@ -85,7 +84,8 @@ frontend/
 
 - **All config via env vars** — pydantic-settings in backend, NEXT_PUBLIC_ prefix in frontend
 - **Stateless backend** — no in-memory state, no filesystem dependencies. Ready for horizontal scaling.
-- **Migrations are explicit** — run `alembic upgrade head` manually, never on app startup
+- **Migrations run on startup** — backend auto-runs `alembic upgrade head` at boot. In production K8s, use an init container instead to avoid races across replicas.
+- **First user is superadmin** — the first registered user gets `is_superadmin=True` automatically. No seed data needed.
 - **Org-scoped data** — all user data is scoped to an organization. Every query must filter by org_id.
 - **API versioning** — all API routes are prefixed with `/api/v1/`. New routers must use `APIRouter(prefix="/api/v1/{resource}")`. Breaking changes go in `/api/v2/` while v1 stays operational.
 - **Auth on every endpoint** — use `get_current_user` dependency. Only /health, /ready, /api/v1/auth/login, /api/v1/auth/register, /api/v1/auth/refresh are public.
