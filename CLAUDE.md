@@ -12,30 +12,34 @@ PFV2 is a personal finance management application. FastAPI backend, Next.js + Ty
 - **Frontend:** Next.js 15 (App Router), React 19, TypeScript, Tailwind CSS, SWR
 - **Database:** MySQL 8.0
 - **Auth:** JWT (access + refresh tokens), bcrypt via passlib
-- **Dev environment:** Docker Compose
+- **Reverse proxy:** nginx (single entry point on port 80)
+- **Dev environment:** Docker Compose + `./pfv` CLI
 
 ## Running Locally
 
 ```bash
-cp .env.example .env              # First time only
-docker compose up --build         # Start all services
-docker compose exec backend alembic upgrade head  # Run migrations (first time / after new migrations)
+cp .env.example .env    # First time only
+./pfv start             # Build, start, run migrations
+./pfv stop              # Stop all services
+./pfv restart           # Restart without rebuild
+./pfv rebuild           # Force rebuild (no cache)
+./pfv reset             # Destroy all data and start fresh
+./pfv migrate           # Run pending migrations
+./pfv logs [service]    # View logs (backend, frontend, nginx, mysql)
+./pfv status            # Container status
+./pfv shell [service]   # Shell into a container (default: backend)
 ```
 
-- Frontend: http://localhost:3000
-- Backend: http://localhost:8000
-- API docs: http://localhost:8000/docs
+- App: http://localhost
+- API: http://localhost/api/
+- API docs: http://localhost/docs
 
 ## Common Commands
 
 ```bash
-# Migrations
-docker compose exec backend alembic upgrade head        # Apply all pending
+# Migrations (via pfv script or directly)
+./pfv migrate
 docker compose exec backend alembic revision -m "description"  # Create new migration
-
-# Logs
-docker compose logs backend -f
-docker compose logs frontend -f
 
 # Rebuild after dependency changes
 docker compose up --build -d backend
@@ -45,7 +49,8 @@ docker compose up --build -d frontend
 ## Architecture
 
 ```
-frontend (Next.js :3000)  →  Bearer JWT  →  backend (FastAPI :8000)  →  MySQL (:3306)
+Browser → nginx (:80) → /api/*  → backend (FastAPI :8000) → MySQL (:3306)
+                      → /*      → frontend (Next.js :3000)
 ```
 
 All frontend-to-backend communication uses Bearer token authentication. No exceptions.
@@ -84,3 +89,5 @@ frontend/
 - **Org-scoped data** — all user data is scoped to an organization. Every query must filter by org_id.
 - **Auth on every endpoint** — use `get_current_user` dependency. Only /health, /ready, /api/auth/login, /api/auth/register, /api/auth/refresh are public.
 - **Enum values** — SQLAlchemy enums use `values_callable=lambda x: [e.value for e in x]` to store lowercase values in MySQL
+- **Frontend has two Dockerfiles** — `Dockerfile.dev` for local dev (hot reload with volume mounts), `Dockerfile` for production (multi-stage standalone build, ~slim image)
+- **nginx is the single entry point** — backend and frontend only expose ports internally. `/api/*` routes to FastAPI, everything else to Next.js. `/docs` and `/openapi.json` are proxied directly.
