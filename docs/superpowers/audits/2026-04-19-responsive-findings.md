@@ -3,15 +3,19 @@
 Source: spec `docs/superpowers/specs/2026-04-19-responsive-sweep-design.md`.
 
 ## Method
-Code scan followed by visual verification (pending per-page). Viewport targets: 375px, 768px, 1280px.
+Code scan followed by visual verification. Viewport targets: 375px, 768px, 1280px.
+
+## Status
+- **PR1 implementation:** complete (Transactions, Forecast Plans, Budgets). Visual verification pending merge.
+- **PR2 implementation:** not started.
 
 ## Findings table
 
 | Page | Current state | Symptom < md | Chosen pattern | PR |
 |---|---|---|---|---|
-| transactions | 12-col CSS grid "table" (`grid grid-cols-12`) for rows + a wrap-capable filter bar (`flex flex-wrap` with `min-w-[200px]` search field). Quick-add form is already `grid-cols-1 sm:grid-cols-2 lg:grid-cols-4`. Row container wrapped in `overflow-x-auto`. | 12-col grid squeezes every cell (date/description/category/amount) into unreadable widths; tiny action icons drop below the 44px tap target. Filter bar wraps but each 200px-min field still forces horizontal scroll on 375px. | Card (A) | PR1 |
-| forecast-plans | Plain table built as a custom grid via `grid-cols-[1fr_100px_100px_100px_80px(_100px)]` template. No `overflow-x-auto`, no `sm:/md:` on the row template. Inline bar-chart section uses fixed `style={{ height }}`. Filters row is `flex flex-wrap` with `min-w-[200px]`. | Fixed px column template plus chart row blow past 375px viewport → horizontal page scroll. Numeric columns still render but category names truncate hard. | Hybrid (B) | PR1 |
-| budgets | Summary tiles in a `flex gap-4` row of three cards (no breakpoint), category list built from raw `flex` rows with per-row progress bars and transfer form (`flex flex-wrap` + `basis-40`). Chart section uses `style={{ height }}`. Add form is `flex flex-wrap`. No `sm:/md:/lg:` anywhere in the file. | Three summary cards stay side-by-side on 375px and shrink to ~100px each, truncating amounts. Inline progress bars + action buttons on the same row push off-screen; the transfer sub-form overlaps. | Hybrid (B) | PR1 |
+| transactions | 12-col CSS grid "table" (`grid grid-cols-12`) for rows + a wrap-capable filter bar. **PR1 fix:** header row + grid rows gated `hidden md:block`; new `md:hidden` card sibling renders the same transactions with amount, date/account subline, category, and Edit/Settle/Delete buttons at `min-h-[44px]`. Filter bar stacks `flex-col sm:flex-row`. Inline edit form stacks at `grid-cols-1 sm:grid-cols-2`. | Original: 12-col grid squeezed fields to unreadable widths below `md`. Resolved by card layout. | Card (A) | PR1 ✅ |
+| forecast-plans | Custom CSS-grid "table" (`grid-cols-[...]`). **PR1 fix:** grid template becomes `grid-cols-[1fr_100px]` below `md`, restores full template at `md+`. Actual/Variance/Source cells gated `hidden md:block`. Inline summary line inside Category cell shows Actual/Variance/Source below `md`. Wrapper uses `overflow-x-auto` with `min-w-[320px]` fallback (not 640 — the mobile column set fits 320 naturally, per implementer). Add-item form stacks `flex-col sm:flex-row`. | Original: fixed px template overflowed at 375px; category names truncated. Resolved by hide-and-scroll with inline summary. | Hybrid (B) | PR1 ✅ |
+| budgets | Flex-row per budget with inline progress bar, amount, and actions. **PR1 fix:** each row reflows to `flex-col md:flex-row md:items-center md:justify-between`; amount duplicated with `ml-auto md:hidden` (mobile position) and `hidden md:inline` (desktop position) so only one shows per viewport. Actions get `flex flex-wrap`, `min-h-[44px] md:min-h-0`. Summary tiles: `grid-cols-1 sm:grid-cols-3`. Add-budget + transfer inline forms: `flex-col sm:flex-row`. Header action row: `flex-col sm:flex-row sm:items-center`. No per-row expansion chart — page has a single aggregate bar chart, no change. | Original: amounts overlapped category names; Transfer/Edit/Remove too small to tap; summary cards shrank to unreadable widths on 375px. All three resolved. | Reflow (A-adapted) | PR1 ✅ |
 | recurring | Two `grid grid-cols-12` "tables" (active / inactive) wrapped in `overflow-x-auto`. No headers, no breakpoint prefixes. Actions live in `col-span-2 flex justify-end gap-2`. | 12-col grid collapses every cell on 375px; action buttons undersized; horizontal scroll is required just to see the amount. | Card (A) | PR2 |
 | accounts | Two-column `grid grid-cols-1 gap-6 lg:grid-cols-2` outer layout, then each column renders a list of `flex items-center justify-between` rows with inline delete/edit/form controls. | Outer layout already stacks below `lg`, but inner rows squeeze name + balance + actions into one flex row; on 375px the action icons wrap under the balance. Add-account form (`flex gap-2`) overflows. | Card (A) | PR2 |
 | categories | Master/sub category list with nested forms (`flex flex-wrap gap-3`) and per-row flex controls including color swatches, rename input, delete. Two `min-w-[200px]` inputs in the master-add form. | Add form's two 200px-min fields force overflow at 375px; sub-category rows with color swatch + name + two buttons push actions offscreen. | Card (A) | PR2 |
@@ -89,7 +93,8 @@ NO-RESPONSIVE: frontend/app/recurring/page.tsx
 
 ## Open questions
 
-- **Budgets inline charts (Pattern B risk).** Spec already calls this out: inline bar charts use `style={{ height }}` and won't comfortably survive hide-and-scroll. If the hybrid feels cramped in PR1 visual verification, Budgets falls back to Pattern A (card) and we document the exception. Likely needs a decision during PR1 implementation, not now.
-- **Transactions "table" is actually a CSS grid**, not a `<table>`. Pattern A still applies (stack rows as cards below `md`), but the column-header row at line 503 and every row at 534/564 all use `grid grid-cols-12`. The fix is the same shape as if it were a real table but won't rely on `hidden md:table-cell`. Worth confirming during PR1 that card rendering doesn't require re-parenting the grid wrapper.
-- **`settings/organization` has a bare `<table>`** (line 256) with no `overflow-x-auto`. This is the only such case in the app and is the most likely cause of page-level horizontal scroll on `/settings/organization` at 375px. Fix is trivial (wrap in `overflow-x-auto`) but noting it here so PR2 doesn't miss it.
-- **Recurring page has no column headers** — the 12-col grid only renders data rows. When we transform to cards below `md`, the primary field choice is the description; confirm during PR2 that's the right "card title" field (vs. next-due-date).
+- **Budgets: page has no per-row chart** — just a single aggregate bar chart above the list. Plan's Step 3 about per-row expansion grids did not apply; handled gracefully during PR1.
+- **Transactions "table" is a CSS grid, not a `<table>`** — confirmed during PR1. Used `hidden md:block` + `md:hidden` card sibling instead of `hidden md:table-cell`. Pattern A still applied successfully.
+- **`settings/organization` has a bare `<table>`** (line 256) with no `overflow-x-auto` — carried into PR2.
+- **Recurring page has no column headers** — primary card-title field decision (description vs next-due-date) carried into PR2.
+- **Period nav icon buttons on Budgets** deliberately not bumped to 44px during PR1 (they are tight icon-only affordances flanking date text). Revisit if touch tests show they're hard to tap.
