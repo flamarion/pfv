@@ -81,6 +81,9 @@ function TransactionsPageContent() {
   const [formFrequency, setFormFrequency] = useState("monthly");
   const [formAutoSettle, setFormAutoSettle] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const loadRefs = useCallback(async () => {
     const [accts, cats, pers] = await Promise.all([
@@ -142,6 +145,26 @@ function TransactionsPageContent() {
   }, [loading, user, loadTransactions, page]);
 
   useEffect(() => { setPage(0); }, [filterAccount, filterCategory, filterType, filterStatus, filterDateFrom, filterDateTo, filterSearch, filterPeriod]);
+
+  useEffect(() => {
+    clearSelection();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterAccount, filterCategory, filterType, filterStatus, filterDateFrom, filterDateTo, filterSearch, filterPeriod, sortField, sortDir, page]);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (
+        e.key === "Escape" &&
+        selectedIds.size > 0 &&
+        !confirmBulkDelete &&
+        !bulkDeleting
+      ) {
+        clearSelection();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedIds.size, confirmBulkDelete, bulkDeleting]);
 
   function handleTypeChange(t: "income" | "expense") {
     setFormType(t);
@@ -211,6 +234,48 @@ function TransactionsPageContent() {
     }
   }
 
+  // Selection state operates on the VISIBLE rows only (transfer pairs are
+  // rendered as a single row — the hidden half cascades server-side). Using
+  // visibleTxs here keeps allPageSelected / togglePage consistent with what
+  // the user actually sees.
+  const selectionHiddenIds = new Set<number>();
+  for (const t of transactions) {
+    if (t.linked_transaction_id && t.id > t.linked_transaction_id) {
+      selectionHiddenIds.add(t.id);
+    }
+  }
+  const selectableTxs = transactions.filter((t) => !selectionHiddenIds.has(t.id));
+
+  const allPageSelected =
+    selectableTxs.length > 0 && selectableTxs.every((t) => selectedIds.has(t.id));
+  const somePageSelected =
+    selectableTxs.some((t) => selectedIds.has(t.id)) && !allPageSelected;
+
+  function toggleOne(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function togglePage() {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allPageSelected) {
+        selectableTxs.forEach((t) => next.delete(t.id));
+      } else {
+        selectableTxs.forEach((t) => next.add(t.id));
+      }
+      return next;
+    });
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
   async function handleDelete(id: number) {
     setConfirmDeleteId(null);
     setError("");
@@ -219,6 +284,34 @@ function TransactionsPageContent() {
       await loadTransactions(page);
     } catch (err) {
       setError(extractErrorMessage(err));
+    }
+  }
+
+  async function handleBulkDelete() {
+    setConfirmBulkDelete(false);
+    setError("");
+    setBulkDeleting(true);
+    try {
+      const body = { ids: Array.from(selectedIds) };
+      const res = await apiFetch<{
+        requested_count: number;
+        deleted_count: number;
+        skipped_ids: number[];
+      }>("/api/v1/transactions/bulk-delete", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      clearSelection();
+      await loadTransactions(page);
+      if (res.skipped_ids.length > 0) {
+        setError(
+          `Deleted ${res.deleted_count} of ${res.requested_count} transactions. ${res.skipped_ids.length} ${res.skipped_ids.length === 1 ? "was" : "were"} already gone.`,
+        );
+      }
+    } catch (err) {
+      setError(extractErrorMessage(err));
+    } finally {
+      setBulkDeleting(false);
     }
   }
 
@@ -306,6 +399,31 @@ function TransactionsPageContent() {
 
   return (
     <AppShell>
+      {selectedIds.size > 0 && (
+        <div className="sticky top-0 z-20 -mx-4 sm:-mx-8 mb-4 flex items-center justify-between gap-3 border-b border-border bg-surface-raised/95 px-4 sm:px-8 py-3 backdrop-blur">
+          <span className="text-sm font-medium" aria-live="polite">
+            {selectedIds.size} selected
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className={btnSecondary}
+              onClick={clearSelection}
+              disabled={bulkDeleting}
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              className="inline-flex min-h-[44px] items-center rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
+              onClick={() => setConfirmBulkDelete(true)}
+              disabled={bulkDeleting}
+            >
+              {bulkDeleting ? "Deleting…" : "Delete selected"}
+            </button>
+          </div>
+        </div>
+      )}
       <div className="mb-8 flex items-center justify-between">
         <h1 className={`${pageTitle} mb-0`}>Transactions</h1>
         <div className="flex items-center gap-2">
@@ -501,9 +619,21 @@ function TransactionsPageContent() {
           <div className={`${card} md:overflow-x-auto`}>
             <div className="hidden md:block border-b border-border px-6 py-3">
               <div className="grid grid-cols-12 gap-4 text-xs font-medium uppercase tracking-wider text-text-muted">
+                <div className="col-span-1 flex items-center">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all on page"
+                    checked={allPageSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = somePageSelected;
+                    }}
+                    onChange={togglePage}
+                    className="h-4 w-4"
+                  />
+                </div>
                 {([
                   { field: "date" as const, label: "Date", span: "col-span-2", align: "" },
-                  { field: "description" as const, label: "Description", span: "col-span-3", align: "" },
+                  { field: "description" as const, label: "Description", span: "col-span-2", align: "" },
                   { field: "account_name" as const, label: "Account", span: "col-span-2", align: "" },
                   { field: "category_name" as const, label: "Category", span: "col-span-2", align: "" },
                   { field: "status" as const, label: "Status", span: "col-span-1", align: "text-center" },
@@ -517,16 +647,11 @@ function TransactionsPageContent() {
               </div>
             </div>
             {(() => {
-              // Precompute tx map for O(1) lookups
+              // Precompute tx map for O(1) lookups. The dedupe set is hoisted
+              // above (selectionHiddenIds) so the selection helpers see the
+              // same hidden-half rule as the render.
               const txMap = new Map(transactions.map((t) => [t.id, t]));
-              // Deduplicate transfers: keep the lower id (expense side)
-              const hiddenIds = new Set<number>();
-              for (const t of transactions) {
-                if (t.linked_transaction_id && t.id > t.linked_transaction_id) {
-                  hiddenIds.add(t.id);
-                }
-              }
-              const visibleTxs = sortedTransactions.filter((t) => !hiddenIds.has(t.id));
+              const visibleTxs = sortedTransactions.filter((t) => !selectionHiddenIds.has(t.id));
               return (
                 <>
                   {/* Desktop/tablet grid rows (md+) */}
@@ -536,6 +661,15 @@ function TransactionsPageContent() {
                       const linkedTx = isTransfer ? txMap.get(tx.linked_transaction_id!) : null;
                       return editingId === tx.id ? (
                         <div key={tx.id} className="grid grid-cols-12 items-center gap-2 px-6 py-2 bg-surface-raised">
+                          <span className="col-span-1 flex items-center">
+                            <input
+                              type="checkbox"
+                              aria-label={`Select transaction ${tx.id}`}
+                              checked={selectedIds.has(tx.id)}
+                              onChange={() => toggleOne(tx.id)}
+                              className="h-4 w-4"
+                            />
+                          </span>
                           <span className="col-span-2"><input aria-label="Date" type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)} className={`text-sm ${input}`} /></span>
                           <span className="col-span-2"><input aria-label="Description" type="text" required value={editDesc} onChange={(e) => setEditDesc(e.target.value)} className={`text-sm ${input}`} /></span>
                           <span className="col-span-2">
@@ -559,15 +693,24 @@ function TransactionsPageContent() {
                             </select>
                             <input aria-label="Amount" type="number" step="0.01" min="0.01" value={editAmount} onChange={(e) => setEditAmount(e.target.value)} className={`text-sm w-20 ${input}`} />
                           </span>
-                          <span className="col-span-2 flex justify-end gap-2">
+                          <span className="col-span-1 flex justify-end gap-2">
                             <button onClick={handleSaveEdit} className="text-xs text-accent hover:text-accent-hover">Save</button>
                             <button onClick={() => setEditingId(null)} className="text-xs text-text-muted hover:text-text-secondary">Cancel</button>
                           </span>
                         </div>
                       ) : (
                         <div key={tx.id} className={`grid grid-cols-12 items-center gap-4 px-6 py-3 transition-colors hover:bg-surface-raised ${tx.status === "pending" ? "opacity-60" : ""}`}>
+                          <span className="col-span-1 flex items-center">
+                            <input
+                              type="checkbox"
+                              aria-label={`Select transaction ${tx.id}`}
+                              checked={selectedIds.has(tx.id)}
+                              onChange={() => toggleOne(tx.id)}
+                              className="h-4 w-4"
+                            />
+                          </span>
                           <span className="col-span-2 text-sm tabular-nums text-text-secondary">{tx.date}</span>
-                          <span className="col-span-3 text-sm text-text-primary">{tx.description}</span>
+                          <span className="col-span-2 text-sm text-text-primary">{tx.description}</span>
                           <span className="col-span-2 text-sm text-text-secondary">
                             {isTransfer && linkedTx
                               ? <>{tx.account_name} &rarr; {linkedTx.account_name}</>
@@ -597,8 +740,8 @@ function TransactionsPageContent() {
                             {isTransfer ? "" : tx.type === "income" ? "+" : "-"}{formatAmount(tx.amount)}
                           </span>
                           <span className="col-span-1 flex justify-end gap-2">
-                            {!isTransfer && <button onClick={() => startEdit(tx)} aria-label={`Edit: ${tx.description}`} className="text-xs text-text-muted hover:text-accent">Edit</button>}
-                            <button onClick={() => setConfirmDeleteId(tx.id)} aria-label={`Delete: ${tx.description}`} className="text-xs text-text-muted hover:text-danger">Delete</button>
+                            {!isTransfer && <button onClick={() => startEdit(tx)} aria-label={`Edit: ${tx.description}`} disabled={bulkDeleting} className="text-xs text-text-muted hover:text-accent disabled:opacity-40 disabled:cursor-not-allowed">Edit</button>}
+                            <button onClick={() => setConfirmDeleteId(tx.id)} aria-label={`Delete: ${tx.description}`} disabled={bulkDeleting} className="text-xs text-text-muted hover:text-danger disabled:opacity-40 disabled:cursor-not-allowed">Delete</button>
                           </span>
                         </div>
                       );
@@ -673,6 +816,13 @@ function TransactionsPageContent() {
                           className={`flex flex-col gap-2 rounded-lg border border-border bg-surface p-4 shadow-sm ${tx.status === "pending" ? "opacity-60" : ""}`}
                         >
                           <div className="flex items-start justify-between gap-2">
+                            <input
+                              type="checkbox"
+                              aria-label={`Select transaction ${tx.id}`}
+                              checked={selectedIds.has(tx.id)}
+                              onChange={() => toggleOne(tx.id)}
+                              className="mt-0.5 h-5 w-5 shrink-0"
+                            />
                             <div className="min-w-0 flex-1">
                               <div className="truncate text-sm font-medium text-text-primary">
                                 {tx.description}
@@ -714,7 +864,8 @@ function TransactionsPageContent() {
                               <button
                                 onClick={() => startEdit(tx)}
                                 aria-label={`Edit: ${tx.description}`}
-                                className="min-h-[44px] px-3 rounded-md border border-border text-sm text-text-secondary"
+                                disabled={bulkDeleting}
+                                className="min-h-[44px] px-3 rounded-md border border-border text-sm text-text-secondary disabled:opacity-40 disabled:cursor-not-allowed"
                               >
                                 Edit
                               </button>
@@ -722,7 +873,8 @@ function TransactionsPageContent() {
                             <button
                               onClick={() => setConfirmDeleteId(tx.id)}
                               aria-label={`Delete: ${tx.description}`}
-                              className="min-h-[44px] px-3 rounded-md border border-border text-sm text-danger"
+                              disabled={bulkDeleting}
+                              className="min-h-[44px] px-3 rounded-md border border-border text-sm text-danger disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               Delete
                             </button>
@@ -747,11 +899,11 @@ function TransactionsPageContent() {
 
           {(page > 0 || hasMore) && (
             <div className="mt-4 flex items-center justify-between">
-              <button onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0} className="rounded-md border border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-surface-raised disabled:opacity-40">
+              <button onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0 || bulkDeleting} className="rounded-md border border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-surface-raised disabled:opacity-40">
                 Previous
               </button>
               <span className="text-xs text-text-muted">Page {page + 1}</span>
-              <button onClick={() => setPage(page + 1)} disabled={!hasMore} className="rounded-md border border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-surface-raised disabled:opacity-40">
+              <button onClick={() => setPage(page + 1)} disabled={!hasMore || bulkDeleting} className="rounded-md border border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-surface-raised disabled:opacity-40">
                 Next
               </button>
             </div>
@@ -766,6 +918,15 @@ function TransactionsPageContent() {
         variant="danger"
         onConfirm={() => confirmDeleteId !== null && handleDelete(confirmDeleteId)}
         onCancel={() => setConfirmDeleteId(null)}
+      />
+      <ConfirmModal
+        open={confirmBulkDelete}
+        title="Delete transactions"
+        message={`Delete ${selectedIds.size} selected transaction${selectedIds.size === 1 ? "" : "s"}? This cannot be undone. Balances will be adjusted for settled transactions.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={handleBulkDelete}
+        onCancel={() => setConfirmBulkDelete(false)}
       />
     </AppShell>
   );

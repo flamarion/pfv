@@ -272,6 +272,90 @@ async def delete_transaction(db: AsyncSession, org_id: int, transaction_id: int)
     await db.commit()
 
 
+async def bulk_delete_transactions(
+    db: AsyncSession, org_id: int, ids: list[int]
+) -> tuple[int, list[int]]:
+    """Delete multiple transactions in one atomic commit.
+
+    Returns (deleted_count, skipped_ids). Cross-org IDs are silently
+    skipped. Transfer-pair halves cascade: deleting one half also deletes
+    the linked half. Balance reverts applied per transaction for settled rows
+    under SELECT FOR UPDATE locks acquired in sorted-ID order to prevent
+    lost updates and deadlocks.
+    """
+    if not ids:
+        return (0, [])
+
+    # Dedupe input — caller may select both halves of a transfer
+    requested = list(dict.fromkeys(ids))
+
+    # Fetch all requested transactions scoped to this org. Lock the rows
+    # FOR UPDATE (ordered by id) so a concurrent delete of the same rows
+    # waits on us instead of producing stale-rowcount errors at flush time.
+    result = await db.execute(
+        select(Transaction)
+        .where(
+            Transaction.id.in_(requested),
+            Transaction.org_id == org_id,
+        )
+        .order_by(Transaction.id)
+        .with_for_update()
+    )
+    found = list(result.scalars().all())
+    found_ids = {tx.id for tx in found}
+    skipped_ids = [i for i in requested if i not in found_ids]
+
+    # Expand transfer pairs — collect linked IDs not already in the list
+    linked_ids_to_fetch = {
+        tx.linked_transaction_id
+        for tx in found
+        if tx.linked_transaction_id is not None
+        and tx.linked_transaction_id not in found_ids
+    }
+    if linked_ids_to_fetch:
+        linked_result = await db.execute(
+            select(Transaction)
+            .where(
+                Transaction.id.in_(linked_ids_to_fetch),
+                Transaction.org_id == org_id,
+            )
+            .order_by(Transaction.id)
+            .with_for_update()
+        )
+        found.extend(linked_result.scalars().all())
+
+    # Collect distinct account IDs that will need a balance revert
+    account_ids_to_lock = sorted({
+        tx.account_id
+        for tx in found
+        if tx.status == TransactionStatus.SETTLED
+    })
+
+    async with db.begin_nested():
+        # Lock each affected account in sorted order to prevent deadlocks
+        accounts: dict[int, Account] = {}
+        for aid in account_ids_to_lock:
+            accounts[aid] = await get_account_for_update(db, aid, org_id)
+
+        # Break linked-transfer FK cycles before deletion so SQLAlchemy can flush
+        # the deletes without hitting a circular dependency error
+        for tx in found:
+            if tx.linked_transaction_id is not None:
+                tx.linked_transaction_id = None
+        await db.flush()
+
+        # Revert balances for settled rows, then delete every row
+        for tx in found:
+            if tx.status == TransactionStatus.SETTLED:
+                acct = accounts.get(tx.account_id)
+                if acct is not None:
+                    revert_balance(acct, tx.amount, tx.type)
+            await db.delete(tx)
+
+    await db.commit()
+    return (len(found), skipped_ids)
+
+
 async def create_transfer(
     db: AsyncSession, org_id: int, body: TransferCreate, *, is_imported: bool = False
 ) -> tuple[Transaction, Transaction]:
