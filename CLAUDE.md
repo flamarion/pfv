@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PFV2 is a personal finance management application. FastAPI backend, Next.js + TypeScript frontend, MySQL database. Designed as a 12-factor app targeting Kubernetes for production.
+The Better Decision is a personal finance management application. FastAPI backend, Next.js + TypeScript frontend, MySQL database. Designed as a 12-factor app targeting Kubernetes for production.
 
 ## Stack
 
@@ -44,6 +44,10 @@ docker compose exec backend alembic revision -m "description"
 docker compose up --build -d backend
 docker compose up --build -d frontend
 ```
+
+## Seeding
+
+For a repeatable local dataset (accounts, transactions, budgets, recurring templates), run `./pfv seed`. See the Seeding Mock Data section of CONTRIBUTING.md for the full workflow and the `SEED_*` environment variables that let you customize the seeded user.
 
 ## Architecture
 
@@ -92,3 +96,5 @@ frontend/
 - **Enum values** — SQLAlchemy enums use `values_callable=lambda x: [e.value for e in x]` to store lowercase values in MySQL
 - **Frontend has two Dockerfiles** — `Dockerfile.dev` for local dev (hot reload with volume mounts), `Dockerfile` for production (multi-stage standalone build, ~slim image)
 - **nginx is the single entry point** — backend and frontend only expose ports internally. `/api/*` routes to FastAPI, everything else to Next.js. `/docs` and `/openapi.json` are proxied directly.
+
+
