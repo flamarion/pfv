@@ -45,15 +45,9 @@ docker compose up --build -d backend
 docker compose up --build -d frontend
 ```
 
-## Local Operation Info
+## Seeding
 
-During the local development, if it's necessary to reset the system to test a new feature or re-seed the system, the following data must be used
-
-- username: flamarion
-- email: flamarion@example.com
-- organization name: Home Sweet Home
-- password: abcd1234
-
+For a repeatable local dataset (accounts, transactions, budgets, recurring templates), run `./pfv seed`. See the Seeding Mock Data section of CONTRIBUTING.md for the full workflow and the `SEED_*` environment variables that let you customize the seeded user.
 
 ## Architecture
 
@@ -89,11 +83,6 @@ frontend/
     ├── api.ts       # Typed fetch wrapper with Bearer token + silent refresh
     └── types.ts     # Shared TypeScript types
 ```
-
-## Working with Next.js
-**When starting work on a Next.js project, ALWAYS call the `init` tool from
-next-devtools-mcp FIRST to set up proper context and establish documentation
-requirements. Do this automatically without being asked.**
 
 ## Key Conventions
 
