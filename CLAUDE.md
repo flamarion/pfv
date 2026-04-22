@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PFV2 is a personal finance management application. FastAPI backend, Next.js + TypeScript frontend, MySQL database. Designed as a 12-factor app targeting Kubernetes for production.
+The Better Decision is a personal finance management application. FastAPI backend, Next.js + TypeScript frontend, MySQL database. Designed as a 12-factor app targeting Kubernetes for production.
 
 ## Stack
 
@@ -45,6 +45,16 @@ docker compose up --build -d backend
 docker compose up --build -d frontend
 ```
 
+## Local Operation Info
+
+During the local development, if it's necessary to reset the system to test a new feature or re-seed the system, the following data must be used
+
+- username: flamarion
+- email: flamarion@example.com
+- organization name: Home Sweet Home
+- password: abcd1234
+
+
 ## Architecture
 
 ```
@@ -80,6 +90,11 @@ frontend/
     └── types.ts     # Shared TypeScript types
 ```
 
+## Working with Next.js
+**When starting work on a Next.js project, ALWAYS call the `init` tool from
+next-devtools-mcp FIRST to set up proper context and establish documentation
+requirements. Do this automatically without being asked.**
+
 ## Key Conventions
 
 - **All config via env vars** — pydantic-settings in backend, NEXT_PUBLIC_ prefix in frontend
@@ -92,3 +107,5 @@ frontend/
 - **Enum values** — SQLAlchemy enums use `values_callable=lambda x: [e.value for e in x]` to store lowercase values in MySQL
 - **Frontend has two Dockerfiles** — `Dockerfile.dev` for local dev (hot reload with volume mounts), `Dockerfile` for production (multi-stage standalone build, ~slim image)
 - **nginx is the single entry point** — backend and frontend only expose ports internally. `/api/*` routes to FastAPI, everything else to Next.js. `/docs` and `/openapi.json` are proxied directly.
+
+
