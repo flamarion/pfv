@@ -1,5 +1,6 @@
 import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { SWRConfig } from "swr";
 
 import ImportPage from "@/app/import/page";
 import { apiFetch } from "@/lib/api";
@@ -513,6 +514,167 @@ describe("ImportPage transfer pill column", () => {
 
     // Pill is rendered for the matched row.
     expect(screen.getByTestId("transfer-pill-2")).toBeInTheDocument();
+  });
+
+  it("Mark as transfer button visible only on rows without detector flags when eligible accounts exist", async () => {
+    const SAVINGS = {
+      ...ACCOUNT,
+      id: 2,
+      name: "Savings",
+      is_default: false,
+    };
+
+    // Two same-currency accounts (Checking + Savings) so manual mark is eligible.
+    const apiFetchMock = vi.mocked(apiFetch);
+    apiFetchMock.mockImplementation(((url: string) => {
+      if (url === "/api/v1/accounts") return Promise.resolve([ACCOUNT, SAVINGS]);
+      if (url === "/api/v1/categories")
+        return Promise.resolve([CATEGORY_EXP, CATEGORY_INC]);
+      if (url === "/api/v1/import/preview")
+        return Promise.resolve(
+          basePreview([
+            // Plain (un-flagged) row → should show Mark button.
+            baseRow({ row_number: 1, description: "Plain row 1" }),
+            // Detector-flagged row → should NOT show Mark button.
+            baseRow({
+              row_number: 2,
+              description: "Pair row",
+              transfer_match_action: "pair_with",
+              transfer_match_confidence: "same_day",
+              pair_with_transaction_id: 99,
+              transfer_candidates: [
+                {
+                  id: 99,
+                  date: "2026-05-01",
+                  description: "Counter leg",
+                  amount: 50,
+                  account_id: 2,
+                  account_name: "Savings",
+                  date_diff_days: 0,
+                  confidence: "same_day",
+                },
+              ],
+            }),
+          ]),
+        );
+      return Promise.resolve(undefined);
+    }) as never);
+
+    render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <ImportPage />
+      </SWRConfig>,
+    );
+    const uploadButton = await screen.findByRole("button", {
+      name: /upload & preview/i,
+    });
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["x"], "test.csv", { type: "text/csv" })] },
+    });
+    fireEvent.click(uploadButton);
+    await screen.findByText("test.csv");
+
+    // Plain un-flagged row gets the Mark button.
+    expect(screen.getByTestId("mark-transfer-button-1")).toBeInTheDocument();
+
+    // The detector-flagged row should NOT get a Mark button (it gets a pill instead).
+    expect(screen.queryByTestId("mark-transfer-button-2")).toBeNull();
+    expect(screen.getByTestId("transfer-pill-2")).toBeInTheDocument();
+  });
+
+  it("Confirm payload sets create_transfer_pair when user marks a row", async () => {
+    const SAVINGS = {
+      ...ACCOUNT,
+      id: 2,
+      name: "Savings",
+      is_default: false,
+    };
+
+    const apiFetchMock = vi.mocked(apiFetch);
+    apiFetchMock.mockImplementation(((url: string) => {
+      if (url === "/api/v1/accounts") return Promise.resolve([ACCOUNT, SAVINGS]);
+      if (url === "/api/v1/categories")
+        return Promise.resolve([CATEGORY_EXP, CATEGORY_INC]);
+      if (url === "/api/v1/import/preview")
+        return Promise.resolve(
+          basePreview([
+            baseRow({ row_number: 1, description: "Plain row" }),
+          ]),
+        );
+      return Promise.resolve(undefined);
+    }) as never);
+
+    render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <ImportPage />
+      </SWRConfig>,
+    );
+    const uploadButton = await screen.findByRole("button", {
+      name: /upload & preview/i,
+    });
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["x"], "test.csv", { type: "text/csv" })] },
+    });
+    fireEvent.click(uploadButton);
+    await screen.findByText("test.csv");
+
+    // Click the Mark as transfer button.
+    fireEvent.click(screen.getByTestId("mark-transfer-button-1"));
+
+    // Modal opens. Pick destination account = Savings (id=2).
+    const destSelect = (await screen.findByTestId(
+      "import-mark-transfer-dest-select-1",
+    )) as HTMLSelectElement;
+    fireEvent.change(destSelect, { target: { value: "2" } });
+
+    // Confirm modal.
+    fireEvent.click(screen.getByTestId("import-mark-transfer-confirm-1"));
+
+    // Confirmation pill replaces the button.
+    await waitFor(() => {
+      expect(screen.getByTestId("mark-transfer-pill-1")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("mark-transfer-pill-1")).toHaveTextContent(
+      /Will create transfer to Savings/i,
+    );
+
+    // Provide default category so confirm is enabled.
+    const selects = document.querySelectorAll("select");
+    const defaultCatSelect = selects[selects.length - 1] as HTMLSelectElement;
+    fireEvent.change(defaultCatSelect, { target: { value: "5" } });
+
+    apiFetchMock.mockResolvedValueOnce({
+      imported_count: 1,
+      paired_count: 1,
+      dropped_duplicate_count: 0,
+      skipped_count: 0,
+      error_count: 0,
+      errors: [],
+    } as never);
+
+    const confirmBtn = screen.getByRole("button", { name: /import 1 transaction/i });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      const confirmCall = apiFetchMock.mock.calls.find(
+        ([url]) => url === "/api/v1/import/confirm",
+      );
+      expect(confirmCall).toBeDefined();
+    });
+
+    const confirmCall = apiFetchMock.mock.calls.find(
+      ([url]) => url === "/api/v1/import/confirm",
+    )!;
+    const body = JSON.parse((confirmCall[1] as RequestInit).body as string);
+
+    expect(body.rows).toHaveLength(1);
+    expect(body.rows[0].action).toBe("create_transfer_pair");
+    expect(body.rows[0].partner_account_id).toBe(2);
+    expect(body.rows[0].pair_with_transaction_id).toBeNull();
+    expect(body.rows[0].duplicate_of_transaction_id).toBeNull();
+    expect(body.rows[0].recategorize).toBe(true);
   });
 
   it("results page surfaces paired_count and dropped_duplicate_count", async () => {
