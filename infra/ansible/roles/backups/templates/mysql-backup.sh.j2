@@ -1,5 +1,8 @@
 #!/bin/bash
-# pfv MySQL nightly logical backup. Credentials read from /root/.my.cnf.
+# pfv MySQL nightly logical backup. Credentials read from /root/.my.cnf,
+# which is templated with the dedicated `mysql_backup` user (NOT root).
+# root@localhost stays on Ubuntu's default socket-auth plugin and is for
+# ad-hoc maintenance via `sudo mysql` only.
 set -euo pipefail
 
 BACKUP_DIR={{ mysql_backup_dir }}

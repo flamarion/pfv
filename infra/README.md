@@ -78,11 +78,16 @@ cd ../ansible
 cp inventory.yml.example inventory.yml
 $EDITOR inventory.yml
 # Fill in:
-#   ansible_host       = $(terraform -chdir=../terraform output -raw droplet_public_ipv4)
-#   private_ipv4       = $(terraform -chdir=../terraform output -raw droplet_private_ipv4)
-#   mysql_app_password = <generated>
-#   mysql_root_password = <generated>
-#   redis_password     = <generated>
+#   ansible_host          = $(terraform -chdir=../terraform output -raw droplet_public_ipv4)
+#   private_ipv4          = $(terraform -chdir=../terraform output -raw droplet_private_ipv4)
+#   mysql_app_password    = <generated>
+#   mysql_backup_password = <generated>
+#   redis_password        = <generated>
+#
+# Note: we intentionally do NOT manage a password for root@localhost.
+# Ubuntu MySQL ships with auth_socket on root, and we keep that — local
+# maintenance is `sudo mysql`. Cron mysqldump uses the dedicated
+# mysql_backup user via /root/.my.cnf.
 
 ansible-galaxy collection install -r requirements.yml
 ansible-playbook playbooks/site.yml

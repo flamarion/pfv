@@ -24,6 +24,46 @@ PFV dataset today. Mostly waiting on dump + import.
 
 ## Cutover
 
+### 0. Attach App Platform to the new VPC
+
+App Platform components live in their own DO-managed VPC by default and can't
+reach the droplet's private IP until the app is explicitly attached to the
+VPC the droplet sits in. Per
+[DO's enable-VPC docs](https://docs.digitalocean.com/products/app-platform/how-to/enable-vpc/),
+this is a top-level `vpc:` block on the app spec.
+
+1. Get the VPC UUID:
+
+   ```bash
+   terraform -chdir=infra/terraform output -raw vpc_id
+   ```
+
+2. Edit `.do/app.yaml`, uncomment the top-level `vpc:` block, paste the UUID:
+
+   ```yaml
+   vpc:
+     id: <vpc-uuid-from-step-1>
+   ```
+
+3. Push the spec via `doctl` (NOT the GitHub deploy action — per
+   `reference_do_spec_sync.md`, `digitalocean/app_action/deploy@v2` silently
+   prefers `app_name` over `app_spec_location`, so the spec file never reaches
+   prod via that path):
+
+   ```bash
+   doctl apps update <APP_ID> --spec .do/app.yaml
+   ```
+
+4. Wait for the deploy to finish, then verify the VPC is attached:
+
+   ```bash
+   doctl apps get <APP_ID>
+   ```
+
+   The output should include `vpc.id = <vpc-uuid>`. If the field is empty,
+   the spec didn't take — re-run the `update` and watch the response, do not
+   proceed to "Quiesce the app" until VPC attachment is confirmed.
+
 ### 1. Snapshot the managed DB (belt-and-suspenders)
 
 DO control panel -> Databases -> pfv mysql cluster -> Backups -> "Create
@@ -80,13 +120,12 @@ Copy the dump up:
 scp pfv2_*.sql.gz root@<droplet_public_ipv4>:/var/backups/mysql/migration/
 ```
 
-On the droplet:
+On the droplet (run as root via `sudo` — root@localhost uses Ubuntu's
+default socket-auth plugin, so no password is needed):
 
 ```bash
-gunzip -c /var/backups/mysql/migration/pfv2_*.sql.gz | mysql pfv2
+sudo bash -c 'gunzip -c /var/backups/mysql/migration/pfv2_*.sql.gz | mysql pfv2'
 ```
-
-(Root creds are in `/root/.my.cnf` thanks to the mysql role.)
 
 ### 5. Verify
 
@@ -102,27 +141,48 @@ counts in step 3, do so and diff here.
 
 ### 6. Update App Platform secrets
 
-Edit the App Platform spec file directly and push with `doctl` (the
-`digitalocean/app_action/deploy` GH Action silently prefers `app_name` over
-the spec; see `reference_do_spec_sync.md`):
+App Platform stores secrets per-component and does NOT auto-inherit them
+across components. The `pfv` spec has THREE secret values that must all be
+updated atomically to point at the droplet:
 
-```yaml
-envs:
-  - key: DATABASE_URL
-    scope: RUN_TIME
-    type: SECRET
-    value: mysql+aiomysql://pfv_app:<password>@<droplet_private_ipv4>:3306/pfv2
-  - key: REDIS_URL
-    scope: RUN_TIME
-    type: SECRET
-    value: redis://default:<password>@<droplet_private_ipv4>:6379/0
-```
+| Component | Secret | New value |
+|---|---|---|
+| `services.backend.envs[DATABASE_URL]` | `DATABASE_URL` | `mysql+aiomysql://pfv_app:<PASSWORD>@<DROPLET_PRIVATE_IPV4>:3306/pfv2` |
+| `services.backend.envs[REDIS_URL]` | `REDIS_URL` | `redis://:<REDIS_PASSWORD>@<DROPLET_PRIVATE_IPV4>:6379/0` |
+| `jobs.migrate.envs[DATABASE_URL]` | `DATABASE_URL` | (same as backend's `DATABASE_URL` above) |
 
-Push:
+**WARNING:** if you only update the backend service's `DATABASE_URL` but
+leave the migrate pre-deploy job pointing at the old managed cluster,
+future deploys will run Alembic against the OLD database while the app
+serves from the NEW one. State diverges silently and you will not notice
+until something breaks.
+
+Two ways to apply (pick one):
+
+- **DO web console:** App -> Settings -> per-component "Environment
+  Variables" -> edit each of the three secret values listed above. Saving
+  triggers a redeploy that re-encrypts the new plaintext.
+- **Spec file + doctl** (preferred, matches the rest of this runbook):
+  edit `.do/app.yaml`, replace the three encrypted `EV[...]` values with
+  the new plaintext (App Platform re-encrypts on save), then push:
+
+  ```bash
+  doctl apps update <APP_ID> --spec .do/app.yaml
+  ```
+
+  Per `reference_do_spec_sync.md`, this MUST be a direct `doctl` push;
+  the `digitalocean/app_action/deploy@v2` GH Action silently prefers
+  `app_name` over `app_spec_location` and will not push the file.
+
+The `EV[...]` form for each secret can be retrieved from the live spec
+afterwards:
 
 ```bash
-doctl apps update <app-id> --spec .do/app.yaml
+doctl apps spec get <APP_ID> --format yaml
 ```
+
+Copy the freshly-encrypted blocks back into `.do/app.yaml` so the
+committed spec stays authoritative for future deploys.
 
 ### 7. Bring the app up
 
@@ -179,7 +239,10 @@ If smoke tests fail or production behaves badly:
      `/etc/mysql/mysql.conf.d/pfv.cnf`).
    - ufw blocking the connection (check `ufw status verbose`).
    - Firewall rule missing (`doctl compute firewall list`).
-   - Wrong password on `pfv_app` (check `/root/.my.cnf` and the secret).
+   - Wrong password on `pfv_app` (compare the App Platform secret value
+     with what was set in `infra/ansible/inventory.yml` /
+     `mysql_app_password`; root@localhost is socket-auth, no password to
+     check there).
 
 ## Posture notes
 

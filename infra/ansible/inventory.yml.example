@@ -15,6 +15,10 @@ all:
     mysql_app_user: pfv_app
     # Generate a strong password and (recommended) store via ansible-vault.
     mysql_app_password: REPLACE_OR_USE_VAULT
-    mysql_root_password: REPLACE_OR_USE_VAULT
+    # Backup user used by nightly mysqldump cron and the migration runbook.
+    # root@localhost is intentionally left on Ubuntu's default socket-auth
+    # plugin (access via `sudo mysql`); we don't manage its password here.
+    mysql_backup_user: pfv_backup
+    mysql_backup_password: REPLACE_OR_USE_VAULT
     # Generate a strong password and (recommended) store via ansible-vault.
     redis_password: REPLACE_OR_USE_VAULT
