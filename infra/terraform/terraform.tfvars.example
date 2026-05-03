@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+do_token     = "dop_v1_REPLACE_ME"
+ssh_key_name = "your-ssh-key-name-in-do"
+
+# Optional overrides:
+# region        = "ams3"
+# droplet_size  = "s-1vcpu-1gb"
+# project_name  = "pfv"
+# vpc_ip_range  = "10.42.0.0/24"
