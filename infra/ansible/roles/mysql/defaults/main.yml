@@ -1,0 +1,11 @@
+---
+# Override these in inventory.yml; vault-encrypt the passwords for real use.
+mysql_app_db: pfv2
+mysql_app_user: pfv_app
+mysql_app_password: CHANGE_ME
+mysql_root_password: CHANGE_ME
+
+# Tuned for s-1vcpu-1gb. Leaves headroom for the OS and Redis (200MB cap).
+mysql_max_connections: 50
+mysql_innodb_buffer_pool_size: 384M
+mysql_innodb_log_file_size: 64M

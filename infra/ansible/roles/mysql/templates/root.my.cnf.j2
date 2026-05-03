@@ -1,0 +1,8 @@
+{# /root/.my.cnf — lets root run mysql/mysqldump non-interactively. #}
+[client]
+user=root
+password={{ mysql_root_password }}
+
+[mysqldump]
+user=root
+password={{ mysql_root_password }}
