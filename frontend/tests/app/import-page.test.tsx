@@ -778,4 +778,75 @@ describe("ImportPage transfer pill column", () => {
     expect(screen.getByText("Plain row 2")).toBeInTheDocument();
     expect(screen.queryByText("Plain row 3")).toBeNull();
   });
+
+  it("Manual transfer mark uses 'from' wording for income rows", async () => {
+    const SAVINGS = {
+      ...ACCOUNT,
+      id: 2,
+      name: "Savings",
+      is_default: false,
+    };
+
+    const apiFetchMock = vi.mocked(apiFetch);
+    apiFetchMock.mockImplementation(((url: string) => {
+      if (url === "/api/v1/accounts") return Promise.resolve([ACCOUNT, SAVINGS]);
+      if (url === "/api/v1/categories")
+        return Promise.resolve([CATEGORY_EXP, CATEGORY_INC]);
+      if (url === "/api/v1/import/preview")
+        return Promise.resolve(
+          basePreview([
+            baseRow({
+              row_number: 1,
+              description: "Salary deposit",
+              type: "income",
+              amount: 1000,
+            }),
+          ]),
+        );
+      return Promise.resolve(undefined);
+    }) as never);
+
+    render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <ImportPage />
+      </SWRConfig>,
+    );
+    const uploadButton = await screen.findByRole("button", {
+      name: /upload & preview/i,
+    });
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["x"], "test.csv", { type: "text/csv" })] },
+    });
+    fireEvent.click(uploadButton);
+    await screen.findByText("test.csv");
+
+    // Open modal for the income row.
+    fireEvent.click(screen.getByTestId("mark-transfer-button-1"));
+
+    // Modal label is "Other account", not "Destination account".
+    expect(await screen.findByText("Other account")).toBeInTheDocument();
+    expect(screen.queryByText("Destination account")).toBeNull();
+
+    // Pick Savings as the other account.
+    const destSelect = (await screen.findByTestId(
+      "import-mark-transfer-dest-select-1",
+    )) as HTMLSelectElement;
+    fireEvent.change(destSelect, { target: { value: "2" } });
+
+    // Direction preview shows "other -> import" for income rows.
+    const direction = screen.getByTestId("import-mark-transfer-direction-1");
+    expect(direction).toHaveTextContent(/Savings\s*→\s*Checking/);
+
+    // Confirm modal.
+    fireEvent.click(screen.getByTestId("import-mark-transfer-confirm-1"));
+
+    // Pill uses "from" wording for income rows (NOT "to").
+    await waitFor(() => {
+      expect(screen.getByTestId("mark-transfer-pill-1")).toBeInTheDocument();
+    });
+    const pill = screen.getByTestId("mark-transfer-pill-1");
+    expect(pill).toHaveTextContent(/Will create transfer from Savings/i);
+    expect(pill).not.toHaveTextContent(/Will create transfer to Savings/i);
+  });
 });

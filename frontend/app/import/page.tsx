@@ -645,7 +645,8 @@ function ImportPageContent() {
                                   data-testid={`mark-transfer-pill-${previewRow.row_number}`}
                                 >
                                   <span>
-                                    Will create transfer to{" "}
+                                    Will create transfer{" "}
+                                    {previewRow.type === "expense" ? "to" : "from"}{" "}
                                     {accountsById.get(ui.markTransferDestAccountId)?.name ??
                                       "account"}
                                   </span>
@@ -864,6 +865,7 @@ function ImportPageContent() {
               rowDate={markTransferModalRow.date}
               rowType={markTransferModalRow.type}
               importAccountId={preview.account_id}
+              importAccountName={currentImportAccount.name}
               importAccountCurrency={currentImportAccount.currency}
               accounts={accounts ?? []}
               initialDestAccountId={

@@ -12,6 +12,7 @@ interface Props {
   rowDate: string;
   rowType: "income" | "expense";
   importAccountId: number;
+  importAccountName: string;
   importAccountCurrency: string;
   accounts: Account[];
   initialDestAccountId: number | null;
@@ -32,6 +33,7 @@ export default function ImportMarkAsTransferModal({
   rowDate,
   rowType,
   importAccountId,
+  importAccountName,
   importAccountCurrency,
   accounts,
   initialDestAccountId,
@@ -92,9 +94,23 @@ export default function ImportMarkAsTransferModal({
     return () => document.removeEventListener("keydown", handleKey);
   }, [onCancel]);
 
+  const selectedAccount = useMemo(
+    () =>
+      destAccountId === ""
+        ? null
+        : eligibleAccounts.find((a) => a.id === Number(destAccountId)) ?? null,
+    [destAccountId, eligibleAccounts],
+  );
+
+  const directionPreview = selectedAccount
+    ? rowType === "expense"
+      ? `${importAccountName} → ${selectedAccount.name}`
+      : `${selectedAccount.name} → ${importAccountName}`
+    : null;
+
   function handleSubmit() {
     if (destAccountId === "") {
-      setErrorMsg("Pick a destination account.");
+      setErrorMsg("Pick an account.");
       return;
     }
     onConfirm(Number(destAccountId));
@@ -135,7 +151,7 @@ export default function ImportMarkAsTransferModal({
 
         <div className="mb-4">
           <label className={label} htmlFor={`import-mark-transfer-dest-${rowNumber}`}>
-            Destination account
+            Other account
           </label>
           <select
             id={`import-mark-transfer-dest-${rowNumber}`}
@@ -156,6 +172,14 @@ export default function ImportMarkAsTransferModal({
           {eligibleAccounts.length === 0 && (
             <p className="mt-2 text-xs text-text-muted">
               No other same-currency account available.
+            </p>
+          )}
+          {directionPreview && (
+            <p
+              className="mt-2 text-xs text-text-muted"
+              data-testid={`import-mark-transfer-direction-${rowNumber}`}
+            >
+              Direction: {directionPreview}
             </p>
           )}
         </div>
