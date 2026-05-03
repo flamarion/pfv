@@ -428,6 +428,89 @@ async def execute_import(
                         )
                     action_taken = "drop_as_duplicate"
 
+                elif row.action == "create_transfer_pair":
+                    # First-import case: partner side not yet in DB. Create
+                    # BOTH legs (CSV leg + synthetic partner) and link them
+                    # atomically inside this row's savepoint.
+                    if row.partner_account_id is None:
+                        raise ValidationError(
+                            "partner_account_id required when "
+                            "action='create_transfer_pair'"
+                        )
+
+                    # Validate partner: same org, different from import
+                    # account, same currency.
+                    partner_account = await db.scalar(
+                        select(Account).where(
+                            Account.id == row.partner_account_id,
+                            Account.org_id == org_id,
+                        )
+                    )
+                    if partner_account is None:
+                        raise NotFoundError("Partner account")
+                    if partner_account.id == body.account_id:
+                        raise ValidationError(
+                            "Partner account must differ from import account"
+                        )
+                    if partner_account.currency != destination_account.currency:
+                        raise ValidationError(
+                            "Partner account currency must match import "
+                            "account currency"
+                        )
+
+                    # CSV leg — same shape as the plain create branch.
+                    csv_body = TransactionCreate(
+                        account_id=body.account_id,
+                        category_id=category_id,
+                        description=row.description,
+                        amount=row.amount,
+                        type=row.type,
+                        date=row.date,
+                    )
+                    csv_leg = await _create_transaction_no_commit(
+                        db, org_id, csv_body, is_imported=True
+                    )
+
+                    # Synthetic partner leg — opposite type, same magnitude
+                    # / date / description / status. is_imported=False
+                    # because the partner row was synthesized by us, not
+                    # parsed from a bank export.
+                    partner_type = "income" if row.type == "expense" else "expense"
+                    partner_body = TransactionCreate(
+                        account_id=row.partner_account_id,
+                        category_id=category_id,
+                        description=row.description,
+                        amount=row.amount,
+                        type=partner_type,
+                        date=row.date,
+                    )
+                    partner_leg = await _create_transaction_no_commit(
+                        db, org_id, partner_body, is_imported=False
+                    )
+
+                    # Determine which leg is expense / income for _link_pair.
+                    if csv_leg.type == TransactionType.EXPENSE:
+                        expense_tx, income_tx = csv_leg, partner_leg
+                    else:
+                        expense_tx, income_tx = partner_leg, csv_leg
+
+                    # _link_pair's currency invariant requires .account
+                    # loaded on both legs.
+                    await db.refresh(csv_leg, attribute_names=["account"])
+                    await db.refresh(partner_leg, attribute_names=["account"])
+
+                    await _link_pair(
+                        db,
+                        expense_tx=expense_tx,
+                        income_tx=income_tx,
+                        recategorize=row.recategorize,
+                        transfer_category_id=row.transfer_category_id,
+                    )
+                    paired_pair_ids.append((csv_leg.id, partner_leg.id))
+                    # Bind for post-savepoint telemetry.
+                    new_tx = csv_leg
+                    action_taken = "create_transfer_pair"
+
         except (ConflictError, ValidationError, NotFoundError) as exc:
             # Domain failures: row-level error, batch continues.
             errors.append(
@@ -475,6 +558,18 @@ async def execute_import(
                 duplicate_of_transaction_id=row.duplicate_of_transaction_id,
                 account_id=body.account_id,
                 amount=str(row.amount),  # spec §6.1: amount as string
+            )
+        elif action_taken == "create_transfer_pair":
+            # Counts as ONE CSV row (we created two legs but only one was in
+            # the CSV — the partner is synthetic).
+            paired_count += 1
+            await logger.ainfo(
+                "transfers.linked",
+                org_id=org_id,
+                expense_id=expense_tx.id,
+                income_id=income_tx.id,
+                source="import_create_pair",
+                recategorized=row.recategorize,
             )
 
         # ── Best-effort learning from the user's category choice ───────────
