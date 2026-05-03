@@ -212,12 +212,73 @@ Wait for `/api/v1/health` and `/api/v1/ready` to go green.
 - [ ] Check `/var/log/mysql/slow.log` on the droplet for any unexpected
       slow queries during the smoke test.
 
-### 9. Decommission grace period
+### 9. Persist the live spec to `.do/app.yaml` (REQUIRED before next deploy)
+
+> **Why this step exists.** The GitHub Actions deploy workflow at
+> `.github/workflows/deploy.yml` pushes the committed `.do/app.yaml` as
+> the authoritative spec on every merge to `main`. After the cutover
+> above, the **live** spec on App Platform has the correct `vpc.id` and
+> the new encrypted `EV[...]` secret blobs for `DATABASE_URL` (backend
+> and migrate job) and `REDIS_URL`. The **committed** file does not.
+> If you skip this step, the next normal deploy reverts the live spec
+> back to the committed file, dropping VPC attachment and / or pointing
+> secrets at whatever was there before.
+
+This gate runs after smoke tests pass and BEFORE you decommission the
+managed databases (so you can roll back if you find a problem in the
+diff).
+
+#### 9a. Fetch the live spec
+
+```bash
+doctl apps spec get <APP_ID> --format yaml > /tmp/live-app.yaml
+```
+
+#### 9b. Diff against the committed file
+
+```bash
+diff -u .do/app.yaml /tmp/live-app.yaml | less
+```
+
+The diff should show exactly:
+
+- `vpc:` block at the top level with the real VPC UUID (uncommented).
+- `services.backend.envs[DATABASE_URL]` — new `EV[...]` blob.
+- `services.backend.envs[REDIS_URL]` — new `EV[...]` blob.
+- `jobs.migrate.envs[DATABASE_URL]` — new `EV[...]` blob.
+
+Anything else (instance counts, regions, env-var values you didn't
+touch) MUST match. If something else differs, investigate before
+proceeding — the live spec may have drifted from its source-of-truth.
+
+#### 9c. Update the committed file
+
+Copy the verified differences from `/tmp/live-app.yaml` into
+`.do/app.yaml`. Keep the existing comments / structure intact; only
+swap the four target sections (vpc + three EV blobs).
+
+#### 9d. Commit and push
+
+```bash
+git checkout -b chore/post-cutover-spec-persist
+git add .do/app.yaml
+git diff --staged                       # final read-through
+git commit -m "chore(infra): persist post-cutover app spec (vpc + 3 EV secrets)"
+git push -u origin chore/post-cutover-spec-persist
+gh pr create --title "chore(infra): persist post-cutover app spec" --body "Reflects the live App Platform state after the managed-to-droplet cutover. Required before any subsequent main deploy or the GH Actions workflow will revert vpc.id and rotate secrets back to pre-cutover values."
+```
+
+Merge that PR before any other change lands on `main`. Until it's
+merged, **do NOT** trigger a deploy via merge-to-main: it will overwrite
+the live spec.
+
+### 10. Decommission grace period
 
 Keep the managed DB and Redis running for 24h with no writes. If anything
-goes wrong you can flip `DATABASE_URL`/`REDIS_URL` back and redeploy.
+goes wrong you can flip `DATABASE_URL`/`REDIS_URL` back and redeploy
+(rollback section below).
 
-After 24h of clean operation:
+After 24h of clean operation AND step 9 has merged:
 
 ```bash
 doctl databases delete <mysql-cluster-id>
