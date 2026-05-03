@@ -708,4 +708,74 @@ describe("ImportPage transfer pill column", () => {
       screen.getByText(/1 dropped as duplicate of existing transfer leg/i),
     ).toBeInTheDocument();
   });
+
+  it("Review pairings only filter includes manually marked rows", async () => {
+    // Two same-currency accounts so the manual "Mark as transfer" path is
+    // eligible. Three plain rows, none with a detector flag set — without
+    // the fix, toggling the filter would hide all rows.
+    const SAVINGS = {
+      ...ACCOUNT,
+      id: 2,
+      name: "Savings",
+      is_default: false,
+    };
+
+    const apiFetchMock = vi.mocked(apiFetch);
+    apiFetchMock.mockImplementation(((url: string) => {
+      if (url === "/api/v1/accounts") return Promise.resolve([ACCOUNT, SAVINGS]);
+      if (url === "/api/v1/categories")
+        return Promise.resolve([CATEGORY_EXP, CATEGORY_INC]);
+      if (url === "/api/v1/import/preview")
+        return Promise.resolve(
+          basePreview([
+            baseRow({ row_number: 1, description: "Plain row 1" }),
+            baseRow({ row_number: 2, description: "Plain row 2" }),
+            baseRow({ row_number: 3, description: "Plain row 3" }),
+          ]),
+        );
+      return Promise.resolve(undefined);
+    }) as never);
+
+    render(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <ImportPage />
+      </SWRConfig>,
+    );
+    const uploadButton = await screen.findByRole("button", {
+      name: /upload & preview/i,
+    });
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["x"], "test.csv", { type: "text/csv" })] },
+    });
+    fireEvent.click(uploadButton);
+    await screen.findByText("test.csv");
+
+    // All three rows visible initially.
+    expect(screen.getByText("Plain row 1")).toBeInTheDocument();
+    expect(screen.getByText("Plain row 2")).toBeInTheDocument();
+    expect(screen.getByText("Plain row 3")).toBeInTheDocument();
+
+    // Manually mark row 2 as a transfer to Savings.
+    fireEvent.click(screen.getByTestId("mark-transfer-button-2"));
+    const destSelect = (await screen.findByTestId(
+      "import-mark-transfer-dest-select-2",
+    )) as HTMLSelectElement;
+    fireEvent.change(destSelect, { target: { value: "2" } });
+    fireEvent.click(screen.getByTestId("import-mark-transfer-confirm-2"));
+    await waitFor(() => {
+      expect(screen.getByTestId("mark-transfer-pill-2")).toBeInTheDocument();
+    });
+
+    // Toggle "Review pairings only" ON.
+    const toggle = screen.getByTestId("review-pairings-toggle") as HTMLInputElement;
+    fireEvent.click(toggle);
+    expect(toggle.checked).toBe(true);
+
+    // Only the manually-marked row 2 stays visible. Rows 1 and 3 are
+    // hidden because they have no detector flag and no manual mark.
+    expect(screen.queryByText("Plain row 1")).toBeNull();
+    expect(screen.getByText("Plain row 2")).toBeInTheDocument();
+    expect(screen.queryByText("Plain row 3")).toBeNull();
+  });
 });

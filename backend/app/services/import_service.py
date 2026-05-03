@@ -33,6 +33,7 @@ from app.services.transaction_service import (
     _load_opts,
     find_duplicate_of_linked_leg,
     find_match_candidates,
+    get_account_for_update,
 )
 from app.services.category_rules_service import (
     bump_shared_vote,
@@ -457,6 +458,19 @@ async def execute_import(
                             "Partner account currency must match import "
                             "account currency"
                         )
+
+                    # Acquire account locks in sorted-ID order to prevent
+                    # deadlock with concurrent imports running in the
+                    # opposite direction (import A→B vs import B→A). The
+                    # subsequent _create_transaction_no_commit calls will
+                    # re-acquire the same locks inside this transaction;
+                    # MySQL treats SELECT FOR UPDATE on an already-locked
+                    # row by the same txn as a no-op.
+                    first_id, second_id = sorted(
+                        [body.account_id, row.partner_account_id]
+                    )
+                    await get_account_for_update(db, first_id, org_id)
+                    await get_account_for_update(db, second_id, org_id)
 
                     # CSV leg — same shape as the plain create branch.
                     csv_body = TransactionCreate(

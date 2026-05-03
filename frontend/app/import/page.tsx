@@ -505,11 +505,16 @@ function ImportPageContent() {
                   if (!rowState) return null;
 
                   // Apply Review pairings filter — when ON, only render rows
-                  // with a transfer detector match (Detector 1 or Detector 2).
+                  // with a transfer detector match (Detector 1 or Detector 2)
+                  // OR a manual "Mark as transfer..." selection in the
+                  // per-row UI state.
+                  const manualMarkDestId =
+                    transferUi[previewRow.row_number]?.markTransferDestAccountId ?? null;
                   if (
                     reviewPairingsOnly &&
                     previewRow.transfer_match_action === "none" &&
-                    !previewRow.is_duplicate_of_linked_leg
+                    !previewRow.is_duplicate_of_linked_leg &&
+                    manualMarkDestId === null
                   ) {
                     return null;
                   }

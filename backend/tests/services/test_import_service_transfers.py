@@ -1005,3 +1005,91 @@ async def test_confirm_create_transfer_pair_increments_paired_count(
         + result.error_count
     )
     assert total == len(body.rows)
+
+
+async def test_create_transfer_pair_locks_accounts_in_sorted_order(
+    db_session: AsyncSession,
+    monkeypatch,
+) -> None:
+    """Sanity check: account locks for create_transfer_pair are acquired in
+    sorted-ID order BEFORE either _create_transaction_no_commit call.
+    Mirrors the pattern in convert_and_create_leg's lock-ordering test
+    (PR-#118 review fix — deadlock prevention).
+    """
+    seed = await _seed_two_accounts(db_session)
+    # src_id < dst_id by insertion order; verify and capture both for the
+    # sorted-ID assertion below.
+    src_id = seed["src_id"]
+    dst_id = seed["dst_id"]
+    assert src_id < dst_id
+
+    real_get_account = import_service.get_account_for_update
+    real_create = import_service._create_transaction_no_commit
+    call_log: list[tuple[str, int]] = []
+
+    async def spy_get_account(db, account_id, org_id):
+        call_log.append(("lock_account", account_id))
+        return await real_get_account(db, account_id, org_id)
+
+    async def spy_create(db, org_id, body, *, is_imported=False):
+        call_log.append(("create_no_commit", body.account_id))
+        return await real_create(db, org_id, body, is_imported=is_imported)
+
+    monkeypatch.setattr(
+        import_service, "get_account_for_update", spy_get_account,
+    )
+    monkeypatch.setattr(
+        import_service, "_create_transaction_no_commit", spy_create,
+    )
+
+    when = datetime.date(2026, 5, 1)
+    body = ImportConfirmRequest(
+        account_id=src_id,
+        default_category_id=seed["transfer_cat_id"],
+        rows=[ImportConfirmRow(
+            row_number=1, date=when,
+            description="TO SAVINGS", amount=Decimal("80"),
+            type="expense",
+            category_id=seed["transfer_cat_id"],
+            action="create_transfer_pair",
+            partner_account_id=dst_id,
+            recategorize=False,
+        )],
+    )
+
+    result = await import_service.execute_import(
+        db_session, org_id=seed["org_id"], body=body,
+    )
+    assert result.paired_count == 1
+    assert result.error_count == 0
+
+    # The account-lock calls (entries with op="lock_account") must come
+    # BEFORE any "create_no_commit" call, AND in sorted-ID order
+    # (lo then hi).
+    lock_entries = [c for c in call_log if c[0] == "lock_account"]
+    create_entries = [c for c in call_log if c[0] == "create_no_commit"]
+    assert len(lock_entries) >= 2, (
+        f"Expected >=2 account locks, got: {call_log}"
+    )
+    assert len(create_entries) >= 2, (
+        f"Expected 2 transaction creates, got: {call_log}"
+    )
+
+    # First two locks are the sorted account-id pair.
+    first_two_lock_ids = [c[1] for c in lock_entries[:2]]
+    assert first_two_lock_ids == sorted(first_two_lock_ids), (
+        f"Account locks must be sorted-ID order; got {first_two_lock_ids}"
+    )
+    assert first_two_lock_ids == [src_id, dst_id]
+
+    # Both account-locks happen BEFORE any create_no_commit.
+    first_create_idx = next(
+        i for i, c in enumerate(call_log) if c[0] == "create_no_commit"
+    )
+    pre_create_locks = [
+        i for i, c in enumerate(call_log[:first_create_idx])
+        if c[0] == "lock_account"
+    ]
+    assert len(pre_create_locks) >= 2, (
+        f"Both account locks must precede the first create; got {call_log}"
+    )
