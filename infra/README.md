@@ -49,27 +49,35 @@ only. ICMP from VPC. ufw on the host repeats the same restrictions.
 
 ## Step-by-step
 
-### 1. Provision (Terraform)
+### 1. Provision (Terraform Cloud)
+
+State and runs live in Terraform Cloud, workspace `FlamaCorp/pfv`, VCS-driven
+against this repo with the working directory and trigger paths both scoped to
+`infra/terraform/`. Workflow:
+
+1. Open a PR that touches `infra/terraform/**`. TFC posts a speculative plan
+   on the run page.
+2. Merge to `main`. TFC starts an apply run. Apply method is **manual confirm**
+   on the TFC UI for now (flip to auto-apply after a few clean cycles).
+
+The workspace expects two variables to be set ahead of time:
+
+- `do_token` — sensitive, the DO API token (scoped per `infra/README.md`).
+- `ssh_key_name` — plaintext, the name of an SSH key already registered in DO.
+
+After the apply succeeds, fetch the outputs from TFC (Workspace -> Outputs)
+or via the CLI once `terraform login` is configured locally:
 
 ```bash
-cd infra/terraform
-cp terraform.tfvars.example terraform.tfvars
-$EDITOR terraform.tfvars   # fill do_token + ssh_key_name
-terraform init
-terraform plan
-terraform apply
+terraform -chdir=infra/terraform output droplet_public_ipv4
+terraform -chdir=infra/terraform output droplet_private_ipv4
+terraform -chdir=infra/terraform output -raw vpc_id
 ```
 
-Note the outputs:
-
-```bash
-terraform output droplet_public_ipv4
-terraform output droplet_private_ipv4
-terraform output vpc_id
-```
-
-State file (`terraform.tfstate`) is local and gitignored. If multiple operators
-need to run this, switch to a DO Spaces backend before sharing.
+Local-CLI runs against the same workspace work too; `terraform login` once,
+then `terraform plan` reaches the remote state. `terraform.tfvars` is for
+local runs only and stays gitignored. The `.terraform.lock.hcl` IS committed
+so TFC and laptops resolve identical provider versions.
 
 ### 2. Configure (Ansible)
 

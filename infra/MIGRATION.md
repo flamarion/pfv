@@ -8,12 +8,11 @@ PFV dataset today. Mostly waiting on dump + import.
 
 ## Pre-flight checklist
 
-- [ ] Terraform applied; droplet reachable via `ssh root@<public_ipv4>`.
+- [ ] TFC apply on `FlamaCorp/pfv` succeeded; droplet reachable via
+      `ssh root@<public_ipv4>` (fetch the IP from TFC outputs or
+      `terraform -chdir=infra/terraform output -raw droplet_public_ipv4`).
 - [ ] Ansible playbook applied; `mysql --version` and `redis-cli ping` work
       on the droplet.
-- [ ] App Platform's outbound VPC routing reaches the droplet's private IP.
-      Sanity check from a worker / ad-hoc droplet inside the VPC:
-      `mysql -h <droplet_private_ipv4> -u pfv_app -p -e 'SELECT 1'`.
 - [ ] Latest weekly DO backup of the managed DB exists. As an extra belt:
       take a fresh mysqldump from the managed DB endpoint (see step 4) before
       the cutover starts.
@@ -21,6 +20,12 @@ PFV dataset today. Mostly waiting on dump + import.
 - [ ] App Platform spec file checked out and ready to edit (per
       `reference_do_spec_sync.md`: deploy via direct `doctl apps update`,
       not the GitHub deploy action).
+
+> **Note on private-IP reachability.** App Platform cannot reach the droplet's
+> 10.42.x.x address until Step 0 below attaches the app to the VPC. Don't try
+> to verify that before Step 0. To verify the *droplet side* end-to-end
+> earlier, spin up a one-shot droplet inside the VPC and run
+> `mysql -h <droplet_private_ipv4> -u pfv_app -p -e 'SELECT 1'` from there.
 
 ## Cutover
 
