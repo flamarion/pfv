@@ -83,12 +83,20 @@ comfort.
 
 ### 2. Quiesce the app
 
-Take the App Platform service offline so no writes happen during the dump:
+Take the App Platform service offline so no writes happen during the dump.
+Easiest path is the DO web console, which avoids hand-crafting a separate
+zero-instance spec file:
+
+> **DO console** -> App -> Components -> `backend` -> Settings ->
+> Resize -> set instance count to `0` -> Save. App Platform redeploys
+> with no backend replica.
+
+CLI alternative (if you prefer to script it):
 
 ```bash
-# Scale backend to 0 instances. Adjust component name as needed.
-doctl apps update <app-id> --spec <path-to-spec-with-instance-count-zero>
-# Or use the UI: App -> Components -> backend -> Settings -> 0 instances.
+# Edit a copy of .do/app.yaml, set services.backend.instance_count: 0,
+# then push that copy. Restore the original count in step 7.
+doctl apps update <app-id> --spec /tmp/app.yaml.zero
 ```
 
 Confirm `/health` returns "service unavailable" (or the route 502s) before
@@ -117,6 +125,14 @@ mysqldump \
 (`--set-gtid-purged=OFF` keeps the dump portable; the new droplet isn't a
 GTID replica.)
 
+Verify the gzip is intact before moving on — a partial dump can silently
+import most of the data and you only notice rows are missing during smoke
+tests:
+
+```bash
+gunzip -t pfv2_*.sql.gz && echo "dump intact"
+```
+
 ### 4. Import into the droplet
 
 Copy the dump up:
@@ -134,6 +150,8 @@ sudo bash -c 'gunzip -c /var/backups/mysql/migration/pfv2_*.sql.gz | mysql pfv2'
 
 ### 5. Verify
 
+Row counts on the droplet:
+
 ```bash
 mysql pfv2 -e 'SHOW TABLES'
 mysql pfv2 -e 'SELECT COUNT(*) FROM users'
@@ -143,6 +161,21 @@ mysql pfv2 -e 'SELECT COUNT(*) FROM accounts'
 
 Counts should match the managed DB. If you can pre-record managed-side
 counts in step 3, do so and diff here.
+
+Schema sanity (catches a silent migration drift between source and target):
+
+```bash
+# On a workstation with access to both endpoints — managed side:
+mysqldump --no-data --skip-comments \
+  -h <managed-host> -P <managed-port> -u doadmin -p \
+  --ssl-mode=REQUIRED pfv2 | sha256sum
+
+# Droplet side, run as root:
+sudo mysqldump --no-data --skip-comments pfv2 | sha256sum
+```
+
+The two checksums should match. A diff here means CREATE TABLE / INDEX
+DDL drifted somewhere — investigate before proceeding.
 
 ### 6. Update App Platform secrets
 
@@ -162,18 +195,27 @@ future deploys will run Alembic against the OLD database while the app
 serves from the NEW one. State diverges silently and you will not notice
 until something breaks.
 
-Two ways to apply (pick one):
+Two ways to apply, in order of preference:
 
-- **DO web console:** App -> Settings -> per-component "Environment
-  Variables" -> edit each of the three secret values listed above. Saving
-  triggers a redeploy that re-encrypts the new plaintext.
-- **Spec file + doctl** (preferred, matches the rest of this runbook):
-  edit `.do/app.yaml`, replace the three encrypted `EV[...]` values with
-  the new plaintext (App Platform re-encrypts on save), then push:
+- **DO web console** (RECOMMENDED): App -> Settings -> per-component
+  "Environment Variables" -> edit each of the three secret values listed
+  above. Saving triggers a redeploy that re-encrypts the new plaintext.
+  The plaintext only ever sits in the browser form field; nothing hits
+  the local filesystem.
+- **Spec file + doctl** (only if you must script it): edit `.do/app.yaml`,
+  replace the three encrypted `EV[...]` values with the new plaintext
+  (App Platform re-encrypts on save), push, then **immediately** overwrite
+  the file with the re-encrypted spec from step 9 below.
 
   ```bash
   doctl apps update <APP_ID> --spec .do/app.yaml
   ```
+
+  > **Footgun.** The committed `.do/app.yaml` briefly contains plaintext
+  > `DATABASE_URL` / `REDIS_URL` on disk between edit and the next git
+  > checkout. Do not commit / push the file in that state, do not
+  > screenshot it, and proceed to step 9 to fetch the re-encrypted spec
+  > before doing anything else.
 
   Per `reference_do_spec_sync.md`, this MUST be a direct `doctl` push;
   the `digitalocean/app_action/deploy@v2` GH Action silently prefers
