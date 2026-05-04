@@ -233,12 +233,31 @@ committed spec stays authoritative for future deploys.
 
 ### 7. Bring the app up
 
-Scale instances back to 1+:
+> **CRITICAL.** This step MUST mirror the path you chose in step 6. If
+> you took the console path in step 6, the local `.do/app.yaml` still
+> contains the OLD `EV[...]` blobs (encrypted to the managed-DB / managed-
+> Redis URLs). Pushing that file here via `doctl apps update --spec`
+> reverts the live secrets and silently re-points the app at the old
+> managed services.
 
-```bash
-# Same spec, instance_count restored to >=1.
-doctl apps update <app-id> --spec .do/app.yaml
-```
+Pick the matching path:
+
+- **Console path (matches step 6 console option, RECOMMENDED):** in the DO
+  web console, App -> Components -> `backend` -> Settings -> Resize -> set
+  instance count back to its prior value (1+). Save. App Platform
+  redeploys with the new (droplet-pointing) secrets already in place.
+  Do NOT push local `.do/app.yaml` from this machine.
+
+- **CLI path (only if step 6 used `doctl apps update --spec`):** push local
+  `.do/app.yaml` ONLY after step 9 below has already replaced the three
+  `EV[...]` blobs locally with the freshly-encrypted forms. If step 9
+  hasn't happened yet, scale back up by editing the live spec instead:
+
+  ```bash
+  doctl apps spec get <APP_ID> --format yaml > /tmp/live-app.yaml
+  # In /tmp/live-app.yaml: bump services.backend.instance_count back to 1+.
+  doctl apps update <APP_ID> --spec /tmp/live-app.yaml
+  ```
 
 Watch the deploy:
 
