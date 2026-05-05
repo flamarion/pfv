@@ -158,10 +158,14 @@ print(data.get("access_token", ""))
 
   # Cookie write-path assertion: refresh_token must be in Set-Cookie.
   # We never print the value — only that the cookie name is present
-  # in headers. Case-insensitive on the header name itself; the cookie
-  # name is case-sensitive per RFC 6265. The regex matches lines
-  # curl actually emits: "Set-Cookie: refresh_token=...".
-  if grep -iqE '^set-cookie:[[:space:]]*refresh_token=' "$login_headers"; then
+  # in headers. Header name is case-insensitive per HTTP; the cookie
+  # name is case-sensitive per RFC 6265 — and the backend writes
+  # exactly `refresh_token` (lowercase). Accepting `Refresh_Token`
+  # would mask a real bug, so do NOT use grep -i (it would weaken
+  # the PR #78 regression guard). The header-name half uses explicit
+  # [Ss][Ee][Tt]-... character classes; the cookie name stays
+  # case-sensitive.
+  if grep -qE '^[Ss][Ee][Tt]-[Cc][Oo][Oo][Kk][Ii][Ee]:[[:space:]]*refresh_token=' "$login_headers"; then
     cookie_present=1
   else
     cookie_present=0
