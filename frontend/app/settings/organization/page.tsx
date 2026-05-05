@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { mutate } from "swr";
 import SettingsLayout from "@/components/SettingsLayout";
 import Spinner from "@/components/ui/Spinner";
 import ConfirmModal from "@/components/ui/ConfirmModal";
@@ -415,6 +416,14 @@ export default function OrganizationSettingsPage() {
                         method: "POST",
                         body: JSON.stringify({ confirm_phrase: resetPhrase.trim() }),
                       });
+                      // Clear every SWR cache key without revalidating —
+                      // the reset wiped accounts/categories/etc. on the
+                      // server, so any cached value in this client session
+                      // (e.g. /import's account+category lists) would
+                      // briefly show deleted rows. Skipping revalidation
+                      // here is safe because we navigate away immediately
+                      // and the destination's hooks will refetch fresh.
+                      await mutate(() => true, undefined, { revalidate: false });
                       router.push("/dashboard?reset=1");
                     } catch (err) {
                       setResetError(extractErrorMessage(err, "Reset failed"));

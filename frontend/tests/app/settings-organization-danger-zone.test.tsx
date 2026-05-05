@@ -3,10 +3,16 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import OrganizationSettingsPage from "@/app/settings/organization/page";
 import { apiFetch } from "@/lib/api";
 import { useAuth } from "@/components/auth/AuthProvider";
+import { mutate } from "swr";
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
   return { ...actual, apiFetch: vi.fn() };
+});
+
+vi.mock("swr", async () => {
+  const actual = await vi.importActual<typeof import("swr")>("swr");
+  return { ...actual, mutate: vi.fn(() => Promise.resolve()) };
 });
 
 vi.mock("@/components/auth/AuthProvider", async () => {
@@ -73,6 +79,7 @@ describe("OrganizationSettingsPage — Danger Zone", () => {
     vi.mocked(apiFetch).mockReset();
     pushMock.mockReset();
     replaceMock.mockReset();
+    vi.mocked(mutate).mockClear();
     mockApiSuccessFixtures();
   });
 
@@ -148,5 +155,29 @@ describe("OrganizationSettingsPage — Danger Zone", () => {
       });
     });
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?reset=1"));
+  });
+
+  it("clears every SWR cache key on reset success before navigating", async () => {
+    mockUser("owner");
+    render(<OrganizationSettingsPage />);
+    await waitFor(() => expect(screen.getByText(/Danger zone/i)).toBeInTheDocument());
+
+    const input = screen.getByLabelText(/confirm reset phrase/i);
+    fireEvent.change(input, { target: { value: `RESET ${ORG_NAME}` } });
+    fireEvent.click(screen.getByRole("button", { name: /reset my data/i }));
+
+    await waitFor(() => expect(vi.mocked(mutate)).toHaveBeenCalled());
+    // Match-all matcher (function predicate), undefined value (clear),
+    // revalidate: false (don't refetch — we're navigating away).
+    const call = vi.mocked(mutate).mock.calls[0];
+    expect(typeof call[0]).toBe("function");
+    expect(call[1]).toBeUndefined();
+    expect(call[2]).toEqual({ revalidate: false });
+    // mutate must be invoked before the redirect, so any subsequent
+    // hook on the destination page sees a clean cache.
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?reset=1"));
+    const mutateOrder = vi.mocked(mutate).mock.invocationCallOrder[0];
+    const pushOrder = pushMock.mock.invocationCallOrder[0];
+    expect(mutateOrder).toBeLessThan(pushOrder);
   });
 });
