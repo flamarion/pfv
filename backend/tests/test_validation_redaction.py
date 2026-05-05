@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from app.main import (
     _REDACTED,
     _SENSITIVE_FIELD_NAMES,
+    _loc_targets_sensitive_field,
     _redact_sensitive,
     request_validation_handler,
 )
@@ -40,6 +41,13 @@ class _WithNested(BaseModel):
     sibling: int
 
 
+class _MfaLike(BaseModel):
+    """Mirrors the shape of MfaVerifyRequest — bare `code` field with a
+    fixed length constraint. A short `code` returns a field-level
+    error with `input` = the submitted scalar."""
+    code: str = Field(min_length=6, max_length=6)
+
+
 @pytest.fixture
 def app() -> FastAPI:
     """Minimal FastAPI app that wires only the handler under test plus
@@ -54,6 +62,10 @@ def app() -> FastAPI:
 
     @a.post("/nested")
     async def nested(body: _WithNested):
+        return {"ok": True}
+
+    @a.post("/mfa")
+    async def mfa(body: _MfaLike):
         return {"ok": True}
 
     return a
@@ -98,12 +110,51 @@ def test_redact_does_not_mutate_input():
 
 def test_sensitive_field_set_covers_review_required_names():
     """Per the architect-locked spec — these names MUST be in the set.
-    Adding more is fine; removing any is a regression."""
+    Adding more is fine; removing any is a regression. The bare `code`
+    name was added after the first review caught that MFA flows
+    (MfaEnableRequest, MfaVerifyRequest, MfaRecoveryRequest,
+    MfaEmailVerifyRequest in backend/app/schemas/auth.py) all use
+    `code` as the field name."""
     required = {
         "password", "new_password", "current_password", "confirm_password",
         "token", "refresh_token", "mfa_token", "email_token", "recovery_code",
+        "code",
     }
     assert required <= _SENSITIVE_FIELD_NAMES
+
+
+# ── unit: _loc_targets_sensitive_field ─────────────────────────────────────
+
+
+def test_loc_redaction_matches_sensitive_field_at_tail():
+    assert _loc_targets_sensitive_field(["body", "password"]) is True
+    assert _loc_targets_sensitive_field(("body", "password")) is True
+
+
+def test_loc_redaction_matches_sensitive_at_any_depth():
+    """A sensitive field nested under a list index (loc=['body', 'items',
+    0, 'password']) still triggers the redaction."""
+    assert _loc_targets_sensitive_field(["body", "items", 0, "password"]) is True
+
+
+def test_loc_redaction_matches_bare_code_for_mfa():
+    assert _loc_targets_sensitive_field(["body", "code"]) is True
+
+
+def test_loc_redaction_does_not_match_unrelated_fields():
+    assert _loc_targets_sensitive_field(["body", "username"]) is False
+    assert _loc_targets_sensitive_field(["body", "email"]) is False
+    assert _loc_targets_sensitive_field(["query", "page"]) is False
+
+
+def test_loc_redaction_handles_non_iterable_loc():
+    """Defensive — if loc is missing or malformed, return False rather
+    than crash the error handler."""
+    assert _loc_targets_sensitive_field(None) is False
+    # A bare string is iterable but the parts are characters, not field
+    # names; we must not match a stray 'p' from "password" inside it.
+    assert _loc_targets_sensitive_field("body.password") is False
+    assert _loc_targets_sensitive_field(42) is False
 
 
 # ── integration: handler returns the standard 422 shape with redacted input ──
@@ -172,3 +223,60 @@ def test_handler_preserves_default_error_shape(client: TestClient):
         assert "type" in err
         assert "loc" in err
         assert "msg" in err
+
+
+# ── regression: field-level scalar leaks (PR #127 review finding 1) ────────
+
+
+def test_field_level_password_scalar_is_redacted(client: TestClient):
+    """Pydantic field-level errors put the offending value in `input`
+    as a SCALAR (not a dict). The recursive walk doesn't catch this,
+    so the handler MUST `loc`-match and redact the whole input.
+    Regression: a too-short password was leaking the literal value."""
+    leaky_password = "shortpw"  # 7 chars — fails min_length=8
+    res = client.post(
+        "/register",
+        json={
+            "username": "valid_user",
+            "email": "x@x.io",
+            "password": leaky_password,
+        },
+    )
+    assert res.status_code == 422
+    # The literal password must NOT appear ANYWHERE in the response —
+    # not in detail[i].input, not in detail[i].ctx, not anywhere.
+    assert leaky_password not in res.text, (
+        f"leaked password found in 422 response: {res.text}"
+    )
+    # And the field-level error for password specifically must redact.
+    body = res.json()
+    pw_errors = [
+        e for e in body["detail"]
+        if isinstance(e.get("loc"), list) and "password" in e["loc"]
+    ]
+    assert pw_errors, f"expected a field-level error for password, got {body}"
+    for err in pw_errors:
+        if "input" in err:
+            assert err["input"] == _REDACTED, err
+
+
+def test_field_level_mfa_code_scalar_is_redacted(client: TestClient):
+    """The bare `code` field is used by MFA verify / recovery / email-
+    verify flows. A field-level validation failure on `code` would
+    otherwise echo the submitted code in the 422 response, defeating
+    the point of code-based auth."""
+    leaky_code = "123"  # 3 chars — fails min_length=6
+    res = client.post("/mfa", json={"code": leaky_code})
+    assert res.status_code == 422
+    assert leaky_code not in res.text, (
+        f"leaked MFA code found in 422 response: {res.text}"
+    )
+    body = res.json()
+    code_errors = [
+        e for e in body["detail"]
+        if isinstance(e.get("loc"), list) and "code" in e["loc"]
+    ]
+    assert code_errors, f"expected a field-level error for code, got {body}"
+    for err in code_errors:
+        if "input" in err:
+            assert err["input"] == _REDACTED, err
