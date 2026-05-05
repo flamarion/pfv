@@ -3,6 +3,8 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
@@ -106,6 +108,62 @@ async def validation_handler(request, exc: ValidationError):
 @app.exception_handler(ConflictError)
 async def conflict_handler(request, exc: ConflictError):
     return JSONResponse(status_code=409, content={"detail": exc.detail})
+
+
+# Field names whose VALUES must never be echoed back in 422 validation
+# errors. FastAPI's default RequestValidationError handler includes the
+# entire input dict under `detail[i].input`, which leaks anything the
+# client posted — most notably passwords on register/login bodies.
+# Match by exact key name; the recursive walk hits nested dicts/lists too.
+_SENSITIVE_FIELD_NAMES = frozenset({
+    "password",
+    "new_password",
+    "current_password",
+    "confirm_password",
+    "token",
+    "refresh_token",
+    "mfa_token",
+    "email_token",
+    "recovery_code",
+})
+
+_REDACTED = "<redacted>"
+
+
+def _redact_sensitive(value):
+    """Walk a JSON-shaped value and replace any field whose key matches
+    `_SENSITIVE_FIELD_NAMES` with the literal string '<redacted>'.
+
+    Returns a new structure; does not mutate the input. Non-dict, non-
+    list values pass through unchanged.
+    """
+    if isinstance(value, dict):
+        return {
+            k: (_REDACTED if k in _SENSITIVE_FIELD_NAMES else _redact_sensitive(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive(v) for v in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request, exc: RequestValidationError):
+    """Sanitize FastAPI's default 422 response so we don't echo
+    submitted passwords back to the client (and into any 4xx response
+    log capture). Preserves the standard `{detail: [...]}` shape — only
+    `detail[i].input` is walked and redacted.
+    """
+    redacted_errors = []
+    for err in exc.errors():
+        new_err = dict(err)
+        if "input" in new_err:
+            new_err["input"] = _redact_sensitive(new_err["input"])
+        redacted_errors.append(new_err)
+    return JSONResponse(
+        status_code=422,
+        content={"detail": jsonable_encoder(redacted_errors)},
+    )
 
 
 app.include_router(auth.router)
