@@ -83,6 +83,12 @@ describe("DashboardPage — forecast info tooltip (L3.7)", () => {
     expect(tooltip.textContent).toMatch(/planned/i);
     expect(tooltip.textContent).toMatch(/forecast plan/i);
     expect(tooltip.textContent).toMatch(/actual/i);
-    expect(tooltip.textContent).toMatch(/already happened/i);
+    // Pin the corrected financial semantic: actuals are settled-only,
+    // matched by settlement date. The earlier copy claimed "settled +
+    // pending" which contradicted backend/forecast_plan_service.py
+    // (Transaction.status == SETTLED + Transaction.settled_date filter).
+    expect(tooltip.textContent).toMatch(/settled transactions/i);
+    expect(tooltip.textContent).toMatch(/settlement date/i);
+    expect(tooltip.textContent).toMatch(/pending.*not counted/i);
   });
 });

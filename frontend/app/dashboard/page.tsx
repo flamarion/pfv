@@ -561,10 +561,10 @@ export default function DashboardPage() {
                     className="absolute left-0 top-full z-20 mt-2 w-72 rounded-md border border-border bg-surface p-3 text-xs leading-relaxed text-text-secondary shadow-lg"
                   >
                     <p>
-                      <strong className="text-text-primary">Planned</strong> is what you set in your forecast plan for this period — the targets you&rsquo;re working against.
+                      <strong className="text-text-primary">Planned</strong> is what you set in your forecast plan for this period (the targets you&rsquo;re working against).
                     </p>
                     <p className="mt-2">
-                      <strong className="text-text-primary">Actual</strong> is what has already happened in this period (settled + pending transactions), computed from your data.
+                      <strong className="text-text-primary">Actual</strong> is the sum of settled transactions for this period, matched by settlement date. Pending transactions are not counted until they settle.
                     </p>
                   </div>
                 </details>
