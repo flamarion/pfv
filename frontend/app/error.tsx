@@ -25,12 +25,11 @@ export default function GlobalError({
   }, [error]);
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-background p-4">
+    <main className="flex min-h-screen items-center justify-center bg-bg p-4">
       <div className={`${card} max-w-md w-full p-6`}>
         <h1 className={`${cardTitle} text-danger`}>Something went wrong</h1>
         <p className="mt-3 text-sm text-text-secondary">
-          The page couldn&rsquo;t be displayed. This is on us — the team has been
-          notified. You can try again, or head back to safer ground.
+          The page couldn&rsquo;t be displayed. You can try again, or head back to safer ground.
         </p>
         {error?.digest && (
           <p className="mt-3 text-xs font-mono text-text-muted">

@@ -12,7 +12,7 @@ export const metadata = {
 
 export default function NotFound() {
   return (
-    <main className="flex min-h-screen items-center justify-center bg-background p-4">
+    <main className="flex min-h-screen items-center justify-center bg-bg p-4">
       <div className={`${card} max-w-md w-full p-6 text-center`}>
         <p className="font-display text-6xl text-text-primary">404</p>
         <h1 className={`${cardTitle} mt-2`}>Page not found</h1>
