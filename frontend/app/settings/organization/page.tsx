@@ -57,7 +57,19 @@ export default function OrganizationSettingsPage() {
   } | null>(null);
   const [closingPeriod, setClosingPeriod] = useState(false);
 
+  // L3.1 Danger Zone — owner-only data reset.
+  // Compare user.role exactly; do NOT use isOwner() from @/lib/auth,
+  // which treats is_superadmin as owner — the backend rejects
+  // superadmin tenant bypass, so the UI must mirror that.
+  const [resetPhrase, setResetPhrase] = useState("");
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState("");
+
   const admin = user ? isAdmin(user) : false;
+  const isOrgOwner = user?.role === "owner";
+  const orgName = user?.org_name ?? "";
+  const expectedResetPhrase = `RESET ${orgName}`;
+  const resetPhraseMatches = resetPhrase.trim() === expectedResetPhrase;
 
   const currentPeriodEndDisplay = currentPeriod
     ? currentPeriod.end_date ?? projectedPeriodEnd(currentPeriod.start_date, Number(billingCycleDay))
@@ -366,6 +378,57 @@ export default function OrganizationSettingsPage() {
             currentRole={user.role as "owner" | "admin" | "member"}
           />
           <SmartRulesSection />
+        </div>
+      )}
+
+      {isOrgOwner && (
+        <div className="mt-6">
+          <section className={`${card} border-danger/40`}>
+            <div className={cardHeader}>
+              <h2 className={`${cardTitle} text-danger`}>Danger zone</h2>
+            </div>
+            <div className="px-6 py-5 space-y-3">
+              <p className="text-sm text-text-secondary">
+                Resetting wipes <strong>transactions, accounts, account types, categories, smart rules, budgets, forecast plans, recurring transactions, and billing periods</strong>. Your organization, members, subscription, settings, feature overrides, and pending invitations are preserved. The action cannot be undone.
+              </p>
+              <p className="text-sm text-text-secondary">
+                Type <code className="rounded bg-surface-raised px-1.5 py-0.5 font-mono text-text-primary">RESET {orgName}</code> to confirm:
+              </p>
+              <input
+                type="text"
+                aria-label="Confirm reset phrase"
+                value={resetPhrase}
+                onChange={(e) => setResetPhrase(e.target.value)}
+                placeholder={expectedResetPhrase}
+                className={`${input} max-w-md`}
+              />
+              {resetError && <p className="text-sm text-danger">{resetError}</p>}
+              <div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!resetPhraseMatches) return;
+                    setResetError("");
+                    setResetting(true);
+                    try {
+                      await apiFetch("/api/v1/orgs/data/reset", {
+                        method: "POST",
+                        body: JSON.stringify({ confirm_phrase: resetPhrase.trim() }),
+                      });
+                      router.push("/dashboard?reset=1");
+                    } catch (err) {
+                      setResetError(extractErrorMessage(err, "Reset failed"));
+                      setResetting(false);
+                    }
+                  }}
+                  disabled={!resetPhraseMatches || resetting}
+                  className="rounded-md bg-danger px-4 py-2 text-sm font-medium text-white hover:bg-danger/90 disabled:opacity-50"
+                >
+                  {resetting ? "Resetting…" : "Reset my data"}
+                </button>
+              </div>
+            </div>
+          </section>
         </div>
       )}
 
