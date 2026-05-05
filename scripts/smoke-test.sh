@@ -19,10 +19,15 @@
 #   SMOKE_PASSWORD     — password for the smoke user
 #
 # The smoke user must:
-#   - exist in the prod org
+#   - live in a DEDICATED smoke-only org with no real financial data.
+#     MEMBER is NOT read-only in this app — many data-plane routes (POST
+#     /transactions, /accounts, /budgets, /categories) only require
+#     get_current_user. A smoke credential with MFA off, sitting in
+#     GitHub Actions secrets, MUST NOT have access to real customer or
+#     household data. OWNER of an empty smoke org is fine; MEMBER of a
+#     real customer org is NOT acceptable.
 #   - have email_verified = True
 #   - have MFA disabled (otherwise login returns a challenge, not a token)
-#   - have role MEMBER (least-privilege; reading /categories needs no more)
 #
 # Exit codes:
 #   0  every check passed
@@ -113,19 +118,32 @@ echo
 check_status "GET /health"  200 GET "/health"  || true
 check_status "GET /ready"   200 GET "/ready"   || true
 
-# Login. Capture access_token from the 200 response. We do not echo the
-# token; we only print a length+prefix proof so a missing/empty token
-# fails clearly.
-login_body="$(printf '{"login":"%s","password":"%s"}' "$USERNAME" "$PASSWORD")"
+# Login. Verifies three things end-to-end:
+#   (a) JWT issuance: 200 with a non-empty access_token in the body.
+#   (b) Cookie write-path: Set-Cookie: refresh_token=... in response
+#       headers. This is exactly the FastAPI cookie merge gotcha that
+#       broke SSO in PR #78 — a passing /login that silently fails to
+#       set the refresh cookie still looks green from the body alone.
+#   (c) MFA invariant: smoke user has MFA disabled.
+#
+# Build the JSON body via python3's json.dumps so a password containing
+# ", \, or a newline doesn't produce invalid JSON. Pass credentials via
+# environment so they never appear in argv (visible in `ps`).
+login_body="$(SMOKE_USER="$USERNAME" SMOKE_PWD="$PASSWORD" python3 -c '
+import json, os
+print(json.dumps({"login": os.environ["SMOKE_USER"], "password": os.environ["SMOKE_PWD"]}))
+')"
 login_response="$(mktemp)"
-login_status="$(curl "${CURL_OPTS[@]}" -o "$login_response" -w '%{http_code}' \
+login_headers="$(mktemp)"
+login_status="$(curl "${CURL_OPTS[@]}" -o "$login_response" -D "$login_headers" \
+  -w '%{http_code}' \
   -X POST -H "Content-Type: application/json" --data "$login_body" \
   "${BASE_URL}/api/v1/auth/login" || echo "000")"
 
 if [[ "$login_status" != "200" ]]; then
   echo "✗ POST /api/v1/auth/login: expected 200, got ${login_status}"
   echo "  body: $(head -c 200 "$login_response" | tr -d '\n')"
-  rm -f "$login_response"
+  rm -f "$login_response" "$login_headers"
   failed=1
 else
   # Extract the access_token without leaking it. python3 is preinstalled
@@ -138,6 +156,17 @@ if "mfa_required" in data:
 print(data.get("access_token", ""))
 ' "$login_response" 2>&1 || true)"
 
+  # Cookie write-path assertion: refresh_token must be in Set-Cookie.
+  # We never print the value — only that the cookie name is present
+  # in headers. Case-insensitive on the header name itself; the cookie
+  # name is case-sensitive per RFC 6265. The regex matches lines
+  # curl actually emits: "Set-Cookie: refresh_token=...".
+  if grep -iqE '^set-cookie:[[:space:]]*refresh_token=' "$login_headers"; then
+    cookie_present=1
+  else
+    cookie_present=0
+  fi
+
   if [[ "$access_token" == *"MFA_CHALLENGE"* ]]; then
     echo "✗ POST /api/v1/auth/login: smoke user has MFA enabled — disable it"
     failed=1
@@ -145,10 +174,14 @@ print(data.get("access_token", ""))
   elif [[ -z "$access_token" ]]; then
     echo "✗ POST /api/v1/auth/login: 200 but no access_token in body"
     failed=1
+  elif (( cookie_present == 0 )); then
+    echo "✗ POST /api/v1/auth/login: 200 with token but Set-Cookie: refresh_token=… is missing"
+    echo "  headers received: $(grep -ic '^set-cookie:' "$login_headers") Set-Cookie line(s)"
+    failed=1
   else
-    echo "✓ POST /api/v1/auth/login (200, token=$(mask "$access_token"))"
+    echo "✓ POST /api/v1/auth/login (200, token=$(mask "$access_token"), refresh_token cookie set)"
   fi
-  rm -f "$login_response"
+  rm -f "$login_response" "$login_headers"
 fi
 
 # Authenticated read. Skip if login failed — no token to use.
