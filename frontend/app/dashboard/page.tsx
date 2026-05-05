@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import Spinner from "@/components/ui/Spinner";
 import { useAuth } from "@/components/auth/AuthProvider";
@@ -46,17 +46,21 @@ const PAGE_SIZE = 10;
 export default function DashboardPage() {
   const { user, loading } = useAuth();
   const router = useRouter();
-  const searchParams = useSearchParams();
   const [resetBanner, setResetBanner] = useState(false);
 
   // L3.1: read ?reset=1 left by the data-reset flow, show a one-time
   // success banner, then strip the param so a refresh doesn't replay it.
+  // Reads window.location instead of useSearchParams() so /dashboard
+  // can stay statically prerenderable in Next 15 — useSearchParams
+  // would force a Suspense boundary or a deopt warning at build time,
+  // and this banner is purely a client-only artifact.
   useEffect(() => {
-    if (searchParams.get("reset") === "1") {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("reset") === "1") {
       setResetBanner(true);
       router.replace("/dashboard");
     }
-  }, [searchParams, router]);
+  }, [router]);
 
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);

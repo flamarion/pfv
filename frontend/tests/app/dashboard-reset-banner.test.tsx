@@ -25,11 +25,9 @@ const pushMock = vi.fn();
 // Return a stable router object so useEffect deps don't re-trigger
 // the banner-show effect on every render after a click.
 const stableRouter = { push: pushMock, replace: replaceMock };
-let searchParamsValue = new URLSearchParams();
 vi.mock("next/navigation", () => ({
   useRouter: () => stableRouter,
   usePathname: () => "/dashboard",
-  useSearchParams: () => searchParamsValue,
 }));
 
 const USER = {
@@ -60,7 +58,10 @@ describe("DashboardPage — reset banner", () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
     replaceMock.mockReset();
-    searchParamsValue = new URLSearchParams();
+    // Reset URL between tests; the page reads window.location.search
+    // directly so the banner-show effect responds to whatever the URL
+    // is at first render.
+    window.history.pushState({}, "", "/dashboard");
     vi.mocked(useAuth).mockReturnValue({
       user: USER as never,
       loading: false,
@@ -79,19 +80,19 @@ describe("DashboardPage — reset banner", () => {
   });
 
   it("renders the banner when ?reset=1", async () => {
-    searchParamsValue = new URLSearchParams("reset=1");
+    window.history.pushState({}, "", "/dashboard?reset=1");
     render(<DashboardPage />);
     await waitFor(() => expect(screen.getByTestId("reset-banner")).toBeInTheDocument());
   });
 
   it("calls router.replace('/dashboard') after first paint to clear the param", async () => {
-    searchParamsValue = new URLSearchParams("reset=1");
+    window.history.pushState({}, "", "/dashboard?reset=1");
     render(<DashboardPage />);
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/dashboard"));
   });
 
   it("dismisses the banner on click", async () => {
-    searchParamsValue = new URLSearchParams("reset=1");
+    window.history.pushState({}, "", "/dashboard?reset=1");
     render(<DashboardPage />);
     await waitFor(() => expect(screen.getByTestId("reset-banner")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /dismiss/i }));
