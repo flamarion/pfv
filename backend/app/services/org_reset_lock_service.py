@@ -30,28 +30,14 @@ Contract:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app._time import utcnow_naive
 from app.models.org_data_reset_lock import OrgDataResetLock
-
-
-def _utcnow_naive() -> datetime:
-    """Return a naive-UTC datetime suitable for the existing
-    ``org_data_reset_locks.acquired_at`` column (declared as the
-    repo's standard naive ``DateTime``).
-
-    Equivalent to the Python <3.12 ``_utcnow_naive()`` semantics
-    but built from the timezone-aware ``datetime.now(timezone.utc)``
-    so it doesn't trigger the 3.12 deprecation warning. Stripping
-    tzinfo at the boundary keeps this drop-in compatible with the
-    naive-UTC column type — no migration churn for this PR. A
-    repo-wide tz sweep is tracked in TECHNICAL DEBT.
-    """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 # How long a lock is considered fresh. After this window an in-flight
 # acquire can override the existing lock — recovery path for workers
@@ -81,7 +67,7 @@ async def acquire_reset_lock(
     by the new caller (with a new lease token). This keeps a crashed
     worker from blocking future resets indefinitely.
     """
-    now = _utcnow_naive()
+    now = utcnow_naive()
     cutoff = now - timedelta(minutes=LOCK_TTL_MINUTES)
     new_token = uuid.uuid4().hex  # 32-char hex; fits in String(36).
 
@@ -150,7 +136,7 @@ async def is_reset_locked(db: AsyncSession, *, org_id: int) -> bool:
     """Diagnostic helper for tests + admin debugging. Returns True if
     a fresh (non-stale) lock exists for ``org_id``.
     """
-    cutoff = _utcnow_naive() - timedelta(minutes=LOCK_TTL_MINUTES)
+    cutoff = utcnow_naive() - timedelta(minutes=LOCK_TTL_MINUTES)
     row = await db.scalar(
         select(OrgDataResetLock).where(
             OrgDataResetLock.org_id == org_id,

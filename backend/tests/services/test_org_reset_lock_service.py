@@ -15,6 +15,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from app._time import utcnow_naive
 from app.models import Base
 from app.models.org_data_reset_lock import OrgDataResetLock
 from app.models.user import Organization, User
@@ -99,7 +100,7 @@ async def test_acquire_overrides_stale_lock_with_new_token(session_factory):
     acquire returns a *fresh* token, not the stale one.
     """
     org_id, user_id = await _seed_org_and_user(session_factory)
-    stale_ts = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(hours=1)
+    stale_ts = utcnow_naive() - datetime.timedelta(hours=1)
     stale_token = "stale_token_aaaaaaaaaaaaaaaaaaaaaaaa"
     async with session_factory() as db:
         db.add(OrgDataResetLock(
@@ -164,7 +165,7 @@ async def test_release_with_stale_token_does_not_delete_successor_lock(session_f
     assert token_a is not None
 
     # A stalls. Simulate by manually aging the row past LOCK_TTL_MINUTES.
-    stale_ts = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(hours=1)
+    stale_ts = utcnow_naive() - datetime.timedelta(hours=1)
     async with session_factory() as db:
         await db.execute(
             update(OrgDataResetLock)
