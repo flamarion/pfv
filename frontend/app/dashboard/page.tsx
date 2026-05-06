@@ -13,6 +13,7 @@ import { input, label, btnPrimary, btnSecondary, card, cardHeader, cardTitle, pa
 
 import { PieChart, Pie, BarChart, Bar, XAxis, YAxis, Cell, Tooltip, ResponsiveContainer } from "recharts";
 import CategorySelect from "@/components/ui/CategorySelect";
+import OnTrackTile from "@/components/dashboard/OnTrackTile";
 import type { Account, BillingPeriod, Budget, Category, Transaction } from "@/lib/types";
 
 interface ForecastPlanItem {
@@ -39,6 +40,27 @@ interface ForecastPlan {
   total_actual_income: string;
   total_actual_expense: string;
   items: ForecastPlanItem[];
+}
+
+// Shape returned by GET /api/v1/forecast?period_start=...
+// Generated server-side by backend/app/services/forecast_service.py.
+// Only the fields the OnTrackTile reads are typed strictly; the rest
+// (per-category breakdown, individual line items) we leave as unknown
+// because nothing on the dashboard surface uses them today.
+interface ForecastProjection {
+  period_start: string;
+  period_end: string;
+  executed_income: string;
+  executed_expense: string;
+  executed_net: string;
+  pending_income: string;
+  pending_expense: string;
+  recurring_income: string;
+  recurring_expense: string;
+  forecast_income: string;
+  forecast_expense: string;
+  forecast_net: string;
+  categories: unknown[];
 }
 
 const PAGE_SIZE = 10;
@@ -72,6 +94,9 @@ export default function DashboardPage() {
   const [billingCycleDay, setBillingCycleDay] = useState(user?.billing_cycle_day ?? 1);
   const [periodIdx, setPeriodIdx] = useState(0);
   const [forecast, setForecast] = useState<ForecastPlan | null>(null);
+  const [forecastProjection, setForecastProjection] = useState<ForecastProjection | null>(null);
+  const [projectionFailed, setProjectionFailed] = useState(false);
+  const [projectionLoading, setProjectionLoading] = useState(false);
   const [fetching, setFetching] = useState(true);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(false);
@@ -166,6 +191,33 @@ export default function DashboardPage() {
     setFetching(false);
   }, [monthFrom, monthTo, realPeriodStart]);
 
+  // Loads the forecast projection from /api/v1/forecast for the
+  // currently-selected billing period. Separate from loadTransactions
+  // because (a) failure here should NOT crash the whole dashboard load
+  // — the OnTrackTile renders a "Projection unavailable. Retry" inline
+  // state instead — and (b) the user can retry from the tile without
+  // re-fetching everything else.
+  const loadForecastProjection = useCallback(async () => {
+    if (!realPeriodStart) {
+      setForecastProjection(null);
+      setProjectionFailed(false);
+      return;
+    }
+    setProjectionLoading(true);
+    try {
+      const projection = await apiFetch<ForecastProjection>(
+        `/api/v1/forecast?period_start=${realPeriodStart}`,
+      );
+      setForecastProjection(projection);
+      setProjectionFailed(false);
+    } catch {
+      setForecastProjection(null);
+      setProjectionFailed(true);
+    } finally {
+      setProjectionLoading(false);
+    }
+  }, [realPeriodStart]);
+
   useEffect(() => {
     if (!loading && user) {
       // Previously `.catch(() => {})` — any failure here (backend 500,
@@ -197,6 +249,12 @@ export default function DashboardPage() {
       });
     }
   }, [loading, user, loadTransactions, page, realPeriodStart]);
+
+  useEffect(() => {
+    if (!loading && user && realPeriodStart) {
+      void loadForecastProjection();
+    }
+  }, [loading, user, realPeriodStart, loadForecastProjection]);
 
   function handleTypeChange(t: "income" | "expense") {
     setFormType(t);
@@ -301,13 +359,6 @@ export default function DashboardPage() {
 
   // Precompute tx map for O(1) linked lookups
   const txMap = new Map(allTransactions.map((tx) => [tx.id, tx]));
-
-  // Totals from ALL period transactions (not just the paginated page).
-  // Transfer halves are persisted as type=income/expense with a non-null
-  // linked_transaction_id pointing at the counterpart; exclude them so
-  // internal transfers don't inflate either the income or expense tile.
-  const totalIncome = allTransactions.filter((tx) => tx.type === "income" && tx.status === "settled" && tx.linked_transaction_id == null).reduce((s, tx) => s + Number(tx.amount), 0);
-  const totalExpense = allTransactions.filter((tx) => tx.type === "expense" && tx.status === "settled" && tx.linked_transaction_id == null).reduce((s, tx) => s + Number(tx.amount), 0);
 
   // Pending totals per account from all period transactions
   const pendingByAccount = allTransactions
@@ -528,99 +579,16 @@ export default function DashboardPage() {
             <Link href="/transactions" className="text-xs text-text-secondary underline underline-offset-2 hover:text-text-primary">View All Transactions</Link>
           </div>
 
-          {/* ═══ ROW 1: Executed | Forecast — two symmetric columns ═══ */}
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            {/* Executed */}
-            <div className={`${card} p-5`}>
-              <h2 className={`mb-4 ${cardTitle}`}>Executed</h2>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Income</p>
-                  <p className="mt-1 text-xl font-semibold tabular-nums text-success">+{formatAmount(totalIncome)}</p>
-                </div>
-                <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Expenses</p>
-                  <p className="mt-1 text-xl font-semibold tabular-nums text-danger">-{formatAmount(totalExpense)}</p>
-                </div>
-              </div>
-              <div className="mt-4 pt-3 border-t border-border-subtle">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Net</p>
-                <p className={`mt-1 font-display text-2xl tabular-nums ${totalIncome - totalExpense >= 0 ? "text-accent" : "text-danger"}`}>
-                  {totalIncome - totalExpense >= 0 ? "+" : ""}{formatAmount(totalIncome - totalExpense)}
-                </p>
-              </div>
-            </div>
-
-            {/* Forecast */}
-            <div className={`${card} p-5`}>
-              <div className="mb-4 flex items-center gap-2">
-                <h2 className={cardTitle}>Forecast</h2>
-                <details className="group relative">
-                  <summary
-                    aria-label="Explain forecast numbers"
-                    className="flex h-5 w-5 cursor-help items-center justify-center rounded-full border border-border text-[10px] font-semibold text-text-muted hover:border-accent hover:text-accent list-none [&::-webkit-details-marker]:hidden"
-                  >
-                    i
-                  </summary>
-                  <div
-                    role="tooltip"
-                    className="absolute left-0 top-full z-20 mt-2 w-72 rounded-md border border-border bg-surface p-3 text-xs leading-relaxed text-text-secondary shadow-lg"
-                  >
-                    <p>
-                      <strong className="text-text-primary">Planned</strong> is what you set in your forecast plan for this period (the targets you&rsquo;re working against).
-                    </p>
-                    <p className="mt-2">
-                      <strong className="text-text-primary">Actual</strong> is the sum of settled transactions for this period, matched by settlement date. Pending transactions are not counted until they settle.
-                    </p>
-                  </div>
-                </details>
-              </div>
-              {forecast ? (() => {
-                const plannedIncome = Number(forecast.total_planned_income);
-                const plannedExpense = Number(forecast.total_planned_expense);
-                const actualIncome = Number(forecast.total_actual_income);
-                const actualExpense = Number(forecast.total_actual_expense);
-                const plannedNet = plannedIncome - plannedExpense;
-                return (
-                  <>
-                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                      <div>
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Income (planned)</p>
-                        <p className="mt-1 text-xl font-semibold tabular-nums text-text-primary">{formatAmount(plannedIncome)}</p>
-                        {actualIncome > 0 && <p className="text-[10px] text-text-muted">{formatAmount(actualIncome)} actual</p>}
-                      </div>
-                      <div>
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Expenses (planned)</p>
-                        <p className="mt-1 text-xl font-semibold tabular-nums text-text-primary">{formatAmount(plannedExpense)}</p>
-                        {actualExpense > 0 && <p className="text-[10px] text-text-muted">{formatAmount(actualExpense)} actual</p>}
-                      </div>
-                    </div>
-                    <div className="mt-4 pt-3 border-t border-border-subtle">
-                      <p className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">Planned Net</p>
-                      <p className={`mt-1 font-display text-2xl tabular-nums ${plannedNet >= 0 ? "text-accent" : "text-danger"}`}>
-                        {plannedNet >= 0 ? "+" : ""}{formatAmount(plannedNet)}
-                      </p>
-                    </div>
-                  </>
-                );
-              })() : (
-                <div className="py-4 text-center">
-                  {isPastSelectedPeriod ? (
-                    <p className="text-sm text-text-muted">No forecast was set for this period.</p>
-                  ) : (
-                    <>
-                      <p className="text-sm text-text-muted mb-2">
-                        {isFutureSelectedPeriod ? "No forecast for this future period." : "No forecast for this period."}
-                      </p>
-                      <Link href="/forecast-plans" className="text-sm text-accent hover:text-accent-hover">
-                        {isFutureSelectedPeriod ? "Plan ahead →" : "Set one up →"}
-                      </Link>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
+          {/* ═══ ROW 1: On Track hero — single full-width tile ═══ */}
+          <OnTrackTile
+            forecastPlan={forecast}
+            projection={forecastProjection}
+            projectionFailed={projectionFailed}
+            projectionLoading={projectionLoading}
+            onRetryProjection={() => void loadForecastProjection()}
+            isPastPeriod={isPastSelectedPeriod}
+            isFuturePeriod={isFutureSelectedPeriod}
+          />
 
           {/* ═══ ROW 2: Accounts — single row, primary slightly bigger ═══ */}
           {accountsWithBalance.length > 0 && (() => {
