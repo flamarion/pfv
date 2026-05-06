@@ -81,9 +81,21 @@ describe("DashboardPage — pending refetch on status toggle (L3.4)", () => {
     } as never);
   });
 
-  it("fires the all-time pending fetch after a status toggle, independent of the visible page", async () => {
+  it("fires the all-time pending fetch after a status toggle on page > 0", async () => {
     let pendingCalls = 0;
     let toggleCallSeen = false;
+
+    // Page 0: 11 rows so hasMore is true and the Next button is enabled.
+    // Each row has a unique id so React keys are stable.
+    const PAGE_0_ROWS = Array.from({ length: 11 }, (_, i) => ({
+      ...SETTLED_TX,
+      id: 200 + i,
+      description: `Row ${i}`,
+    }));
+    // Page 1: SETTLED_TX (description "Coffee"). The aria-label match
+    // below targets exactly this row, so the toggle test is unambiguous
+    // about which page it's on.
+    const PAGE_1_ROWS = [SETTLED_TX];
 
     vi.mocked(apiFetch).mockImplementation(((url: string, init?: RequestInit) => {
       if (url === "/api/v1/accounts") return Promise.resolve([]);
@@ -103,41 +115,57 @@ describe("DashboardPage — pending refetch on status toggle (L3.4)", () => {
         toggleCallSeen = true;
         return Promise.resolve({});
       }
-      // The fetchAll paginator hits ?status=pending&limit=200&offset=N.
-      // Count those calls and return [] (empty page → fetchAll exits).
+      // fetchAll paginator hits ?status=pending&limit=200&offset=N. Count
+      // these calls and return [] so fetchAll exits on the first page.
       if (url.startsWith("/api/v1/transactions?status=pending")) {
         pendingCalls += 1;
         return Promise.resolve([]);
       }
-      // The non-paginated transactions calls (page list + period
-      // aggregate) return [SETTLED_TX] for the "all" call so the toggle
-      // button has something to click.
-      if (url.startsWith("/api/v1/transactions?limit=200")) return Promise.resolve([SETTLED_TX]);
-      if (url.startsWith("/api/v1/transactions?")) return Promise.resolve([SETTLED_TX]);
+      // limit=200 is the period-scoped "all" fetch (donut, charts, etc.).
+      // limit=11 is the paginated visible-page fetch (PAGE_SIZE+1).
+      if (url.startsWith("/api/v1/transactions?limit=200"))
+        return Promise.resolve([...PAGE_0_ROWS, ...PAGE_1_ROWS]);
+      if (url.startsWith("/api/v1/transactions?limit=11&offset=0"))
+        return Promise.resolve(PAGE_0_ROWS);
+      if (url.startsWith("/api/v1/transactions?limit=11&offset=10"))
+        return Promise.resolve(PAGE_1_ROWS);
       return Promise.resolve({});
     }) as never);
 
     render(<DashboardPage />);
 
-    // Wait for the page to settle on initial load — the toggle button
-    // for our SETTLED_TX is rendered in the Recent Transactions list.
+    // Wait for the initial page-0 render. The Next button is enabled
+    // (hasMore=true because PAGE_0_ROWS.length = 11 > PAGE_SIZE).
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: /^Next$/ })).not.toBeDisabled(),
+      { timeout: 3000 },
+    );
+
+    // Navigate to page 1 (page index 1 = "page > 0", the regression case).
+    fireEvent.click(screen.getByRole("button", { name: /^Next$/ }));
+
+    // Wait for page-1 render. SETTLED_TX (Coffee) is now visible; its
+    // status-toggle button has the destination-aware aria-label set in
+    // PR #132.
     await waitFor(
       () => expect(screen.getByLabelText(/Settled status for Coffee/)).toBeInTheDocument(),
       { timeout: 3000 },
     );
 
-    const callsAfterMount = pendingCalls;
-    expect(callsAfterMount).toBeGreaterThan(0); // initial pending load
+    const pendingCallsBeforeToggle = pendingCalls;
+    expect(pendingCallsBeforeToggle).toBeGreaterThan(0);
 
-    // Toggle the status. This used to call loadTransactions(page) only,
-    // leaving pendingByAccount stale on any non-zero page. The fix
-    // wires loadPendingTransactions() into the toggle handler so the
-    // strip's pending totals refresh independent of the visible page.
+    // Toggle the status while the user is on page 1. Pre-fix, this
+    // only called loadTransactions(page=1), which never refetches
+    // pending — strip totals would silently go stale. The fix wires
+    // loadPendingTransactions() into the toggle handler regardless
+    // of the visible page index.
     fireEvent.click(screen.getByLabelText(/Settled status for Coffee/));
 
     await waitFor(() => expect(toggleCallSeen).toBe(true));
-    // Critical assertion: the pending endpoint was re-called after the
-    // toggle, NOT just on the initial load.
-    await waitFor(() => expect(pendingCalls).toBeGreaterThan(callsAfterMount));
+    // Critical assertion: pending endpoint was re-called AFTER the
+    // toggle on page 1, not just on initial mount or the page-change
+    // refetch.
+    await waitFor(() => expect(pendingCalls).toBeGreaterThan(pendingCallsBeforeToggle));
   });
 });

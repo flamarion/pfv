@@ -43,16 +43,25 @@ export default function AccountsPage() {
   const [confirmDeleteAcctId, setConfirmDeleteAcctId] = useState<number | null>(null);
 
   const reload = useCallback(async () => {
+    // Primary fetches: account types + accounts. A failure here is a
+    // real failure — surface it through the existing reload().catch.
+    // Run in parallel with the supplementary pending fetch but don't
+    // let pending's failure bring the whole page down.
+    const pendingPromise = fetchAll<Transaction>("/api/v1/transactions?status=pending")
+      // Best-effort: a pending fetch failure must not (a) blank the
+      // accounts list on initial load, or (b) make a successful
+      // mutation look failed because reload() rejected only due to
+      // the pending augment. Resolve with `null` to signal "skip the
+      // setState" without rejecting the parent Promise.all.
+      .catch(() => null);
     const [types, accts, pending] = await Promise.all([
       apiFetch<AccountType[]>("/api/v1/account-types"),
       apiFetch<Account[]>("/api/v1/accounts"),
-      // Paged so the per-page limit (200 server-side) can't drop older
-      // unresolved pending charges from the per-account totals.
-      fetchAll<Transaction>("/api/v1/transactions?status=pending"),
+      pendingPromise,
     ]);
     setAccountTypes(types ?? []);
     setAccounts(accts ?? []);
-    setPendingTransactions(pending ?? []);
+    if (pending !== null) setPendingTransactions(pending);
     setFetching(false);
   }, []);
 

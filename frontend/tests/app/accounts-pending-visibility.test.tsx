@@ -140,6 +140,25 @@ describe("AccountsPage — pending visibility (L3.4)", () => {
     expect(screen.getAllByText(/^Pending:/)).toHaveLength(1);
   });
 
+  it("renders accounts even when the pending fetch rejects (best-effort)", async () => {
+    // The pending augment must not bring the page down. Account types +
+    // accounts succeed; pending throws. Page must still render the
+    // accounts list and clear the spinner.
+    vi.mocked(apiFetch).mockImplementation(((url: string) => {
+      if (url === "/api/v1/account-types") return Promise.resolve(ACCOUNT_TYPES);
+      if (url === "/api/v1/accounts") return Promise.resolve(ACCOUNTS);
+      if (url.startsWith("/api/v1/transactions?status=pending"))
+        return Promise.reject(new Error("backend down"));
+      return Promise.resolve({});
+    }) as never);
+    render(<AccountsPage />);
+    await waitFor(() => expect(screen.getByText(/Amex Primary/)).toBeInTheDocument());
+    expect(screen.getByText(/ING Joint/)).toBeInTheDocument();
+    // Without the best-effort handling, the spinner would never clear
+    // and Amex Primary would never render.
+    expect(screen.queryByText(/^Pending:/)).not.toBeInTheDocument();
+  });
+
   it("aggregates multiple pending charges per account and ignores other accounts", async () => {
     mockAccountsAPI([
       { id: 1, account_id: 10, amount: "120.00", type: "expense", status: "pending", date: "2026-04-15", description: "a", category_id: null, category_name: null, account_name: "Amex Primary", currency: "EUR", linked_transaction_id: null, is_imported: false, settled_date: null },
