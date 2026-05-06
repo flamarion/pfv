@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import AppShell from "@/components/AppShell";
@@ -97,6 +97,12 @@ export default function DashboardPage() {
   const [forecastProjection, setForecastProjection] = useState<ForecastProjection | null>(null);
   const [projectionFailed, setProjectionFailed] = useState(false);
   const [projectionLoading, setProjectionLoading] = useState(false);
+  // Monotonically-increasing request id for the projection fetch. Used
+  // to discard stale responses when a newer fetch has already started
+  // (e.g. period nav during an in-flight call, or two writes in quick
+  // succession). Only the latest in-flight request is allowed to
+  // commit projection state.
+  const projectionRequestId = useRef(0);
   const [fetching, setFetching] = useState(true);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(false);
@@ -199,13 +205,18 @@ export default function DashboardPage() {
   // re-fetching everything else.
   const loadForecastProjection = useCallback(async () => {
     if (!realPeriodStart) {
+      // Bump the id so any in-flight request from a previous period
+      // can't commit state after we've cleared it.
+      projectionRequestId.current += 1;
       setForecastProjection(null);
       setProjectionFailed(false);
+      setProjectionLoading(false);
       return;
     }
     // Clear stale data synchronously so a period change or a
     // post-write refetch doesn't render the previous period's
     // projection while the new one is in flight.
+    const myId = ++projectionRequestId.current;
     setForecastProjection(null);
     setProjectionFailed(false);
     setProjectionLoading(true);
@@ -213,13 +224,18 @@ export default function DashboardPage() {
       const projection = await apiFetch<ForecastProjection>(
         `/api/v1/forecast?period_start=${realPeriodStart}`,
       );
+      // A newer request has started; this response is stale.
+      if (projectionRequestId.current !== myId) return;
       setForecastProjection(projection);
       setProjectionFailed(false);
     } catch {
+      if (projectionRequestId.current !== myId) return;
       setForecastProjection(null);
       setProjectionFailed(true);
     } finally {
-      setProjectionLoading(false);
+      if (projectionRequestId.current === myId) {
+        setProjectionLoading(false);
+      }
     }
   }, [realPeriodStart]);
 
