@@ -296,3 +296,41 @@ async def test_email_change_rejects_expired_stepup_token(session_factory):
         user = await db.get(User, user_id)
         assert user is not None
         assert user.email == "alice@acme.io"
+
+
+@pytest.mark.asyncio
+async def test_email_change_rejects_replay_of_consumed_stepup_token(session_factory):
+    """Step-up tokens are single-use. The first PUT consumes the token
+    (clears the row), so a second PUT replaying the same token must
+    400 — even if it would otherwise still be inside the 5-min window.
+    Pins the security-critical no-replay invariant."""
+    token = "single-use-token-" + "x" * 8
+    user_id = await _seed_user(
+        session_factory,
+        password_set=False,
+        stepup_token=token,
+        stepup_expires_at=datetime.now(timezone.utc) + timedelta(minutes=4),
+    )
+    app = _make_app(session_factory, user_id)
+    with TestClient(app) as client:
+        first = client.put(
+            "/api/v1/users/me",
+            json={"email": "first@acme.io", "stepup_token": token},
+        )
+        assert first.status_code == 200, first.text
+
+        # Replay the same token: server already cleared it, so the
+        # token-match branch in PUT /users/me must fail.
+        replay = client.put(
+            "/api/v1/users/me",
+            json={"email": "second@acme.io", "stepup_token": token},
+        )
+    assert replay.status_code == 400, replay.text
+
+    # And the second email must NOT have been written.
+    async with session_factory() as db:
+        user = await db.get(User, user_id)
+        assert user is not None
+        assert user.email == "first@acme.io"
+        assert user.stepup_token is None
+        assert user.stepup_token_expires_at is None

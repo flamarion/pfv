@@ -1119,18 +1119,20 @@ async def sso_stepup_callback(
     state: str,
     db: AsyncSession = Depends(get_db),
     oauth_state: str | None = Cookie(default=None),
-    current_user: User = Depends(get_current_user),
 ):
     """Finalize a Google step-up. Issues a 5-minute single-use token.
 
-    The signed-in user is required (the redirect happens in-browser, so
-    the access-token cookie/header is still present). We verify:
-      - state cookie matches the URL `state`
-      - state is shaped `stepup:{user_id}:{nonce}` and `user_id`
-        matches the signed-in user (no cross-account stitching)
+    Browser-driven redirect from Google: no Authorization header is
+    present, so this endpoint cannot use `get_current_user`. Identity
+    is bound through the state-cookie + state-string round trip
+    (same pattern as the SSO login `google_callback`):
+
+      - state cookie matches the URL `state` (CSRF)
+      - state is shaped `stepup:{user_id}:{nonce}`; `user_id` is the
+        target user (looked up directly from the DB)
       - the Google account that completed the consent has the same
-        verified email as the signed-in user (no swapping accounts at
-        the consent screen)
+        verified email as that user (no swapping accounts at the
+        consent screen)
 
     On success, writes a random 32-byte token + 5min expiry onto the
     `users` row and redirects back to /settings with the token in the
@@ -1142,8 +1144,9 @@ async def sso_stepup_callback(
     if not oauth_state or oauth_state != state:
         raise HTTPException(status_code=400, detail="Invalid OAuth state — possible CSRF")
 
-    # Bind state to the signed-in user. Anyone who steals a state value
-    # from another tab cannot redeem it on a different session.
+    # State binds the redemption to a specific user_id chosen at
+    # initiate time. Without an Authorization header here, the state
+    # cookie + state string round trip is the identity proof.
     parts = state.split(":")
     if len(parts) != 3 or parts[0] != "stepup":
         raise HTTPException(status_code=400, detail="Malformed step-up state")
@@ -1151,8 +1154,12 @@ async def sso_stepup_callback(
         state_user_id = int(parts[1])
     except ValueError:
         raise HTTPException(status_code=400, detail="Malformed step-up state")
-    if state_user_id != current_user.id:
-        raise HTTPException(status_code=400, detail="Step-up state does not match this session")
+
+    user = await db.get(User, state_user_id)
+    if user is None:
+        # Treat a missing user as a bad state rather than 404, so we
+        # don't leak which user_ids exist.
+        raise HTTPException(status_code=400, detail="Invalid state")
 
     # Exchange code → tokens → userinfo, identical shape to /google/callback
     try:
@@ -1187,16 +1194,16 @@ async def sso_stepup_callback(
         raw = google_user.get("email_verified", False)
     if not bool(raw):
         raise HTTPException(status_code=400, detail="Google has not verified this email")
-    if not google_email or google_email != current_user.email.strip().lower():
+    if not google_email or google_email != user.email.strip().lower():
         # The user must complete the step-up with the same Google
         # identity attached to this account. Otherwise this would let
-        # an attacker who hijacked the session swap the email by
-        # consenting on their own Google account.
+        # an attacker who initiated step-up for someone else's user_id
+        # swap the email by consenting on their own Google account.
         raise HTTPException(status_code=400, detail="Google account does not match the signed-in user")
 
     token = secrets.token_urlsafe(32)
-    current_user.stepup_token = token
-    current_user.stepup_token_expires_at = datetime.now(timezone.utc) + timedelta(
+    user.stepup_token = token
+    user.stepup_token_expires_at = datetime.now(timezone.utc) + timedelta(
         seconds=STEPUP_TOKEN_TTL_SECONDS
     )
     await db.commit()
