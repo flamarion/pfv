@@ -100,6 +100,27 @@ export default function OnTrackTile({
   const plannedExpense = forecastPlan ? Number(forecastPlan.total_planned_expense) : 0;
   const hasPlan = forecastPlan !== null && plannedExpense > 0;
 
+  // Past period with no plan: non-actionable, past-tense copy.
+  // Runs BEFORE the no-plan branch so a closed period without a plan
+  // doesn't render the current-period "Set one up" CTA.
+  if (isPastPeriod && !hasPlan) {
+    return (
+      <section
+        className={`${card} p-6 md:p-8`}
+        data-testid="on-track-tile"
+        aria-label="No plan was set for this period"
+      >
+        <header className="mb-6 flex items-center justify-between">
+          <span className="text-xs font-semibold uppercase tracking-[0.08em] text-text-muted">
+            Plan vs Actual
+          </span>
+          <span className="text-xs text-text-secondary">Past period</span>
+        </header>
+        <p className="text-sm text-text-muted">No plan was set for this period.</p>
+      </section>
+    );
+  }
+
   // Pre-period (selected period in the future): plan if drafted, suppress everything else.
   if (isFuturePeriod) {
     return (

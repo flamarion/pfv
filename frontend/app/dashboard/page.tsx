@@ -203,6 +203,11 @@ export default function DashboardPage() {
       setProjectionFailed(false);
       return;
     }
+    // Clear stale data synchronously so a period change or a
+    // post-write refetch doesn't render the previous period's
+    // projection while the new one is in flight.
+    setForecastProjection(null);
+    setProjectionFailed(false);
     setProjectionLoading(true);
     try {
       const projection = await apiFetch<ForecastProjection>(
@@ -319,6 +324,11 @@ export default function DashboardPage() {
       setShowForm(false);
       await loadRefs();
       await loadTransactions(0);
+      // The hero verdict is computed from the projection's executed_expense
+      // and forecast_expense. After a write those numbers are stale until
+      // we re-call /api/v1/forecast, otherwise the page's primary answer
+      // ("are we on track?") can be wrong.
+      void loadForecastProjection();
     } catch (err) {
       setError(extractErrorMessage(err));
     }
@@ -464,8 +474,8 @@ export default function DashboardPage() {
               <div className="mb-4 flex items-center gap-4">
                 <h2 className={cardTitle}>{formMode === "transfer" ? "Quick Transfer" : "Quick Add"}</h2>
                 <div className="flex rounded-md border border-border text-xs">
-                  <button type="button" onClick={() => setFormMode("transaction")} className={`px-3 py-1 rounded-l-md ${formMode === "transaction" ? "bg-accent text-accent-text" : "text-text-muted hover:bg-surface-raised"}`}>Transaction</button>
-                  <button type="button" onClick={() => setFormMode("transfer")} className={`px-3 py-1 rounded-r-md ${formMode === "transfer" ? "bg-accent text-accent-text" : "text-text-muted hover:bg-surface-raised"}`}>Transfer</button>
+                  <button type="button" onClick={() => setFormMode("transaction")} className={`px-3 py-1 rounded-l-md ${formMode === "transaction" ? "bg-surface-overlay text-text-primary" : "text-text-muted hover:bg-surface-raised"}`}>Transaction</button>
+                  <button type="button" onClick={() => setFormMode("transfer")} className={`px-3 py-1 rounded-r-md ${formMode === "transfer" ? "bg-surface-overlay text-text-primary" : "text-text-muted hover:bg-surface-raised"}`}>Transfer</button>
                 </div>
               </div>
               <form onSubmit={handleQuickAdd} className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -832,11 +842,11 @@ export default function DashboardPage() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      <span className={`text-sm font-medium tabular-nums ${isTransfer ? "text-accent" : tx.type === "income" ? "text-success" : "text-danger"}`}>
+                      <span className={`text-sm font-medium tabular-nums ${isTransfer ? "text-info" : tx.type === "income" ? "text-success" : "text-danger"}`}>
                         {isTransfer ? "" : tx.type === "income" ? "+" : "-"}{formatAmount(tx.amount)}
                       </span>
                       {!isTransfer && (
-                        <button onClick={async () => { try { await apiFetch(`/api/v1/transactions/${tx.id}`, { method: "PUT", body: JSON.stringify({ status: tx.status === "settled" ? "pending" : "settled" }) }); await loadTransactions(page); await loadRefs(); } catch (err) { setError(extractErrorMessage(err)); } }} aria-label={`Toggle status`} className={`rounded px-1 py-0.5 text-[9px] font-medium ${tx.status === "settled" ? "bg-success-dim text-success" : "bg-surface-overlay text-text-muted"}`}>
+                        <button onClick={async () => { try { await apiFetch(`/api/v1/transactions/${tx.id}`, { method: "PUT", body: JSON.stringify({ status: tx.status === "settled" ? "pending" : "settled" }) }); await loadTransactions(page); await loadRefs(); void loadForecastProjection(); } catch (err) { setError(extractErrorMessage(err)); } }} aria-label={`Toggle status`} className={`rounded px-1 py-0.5 text-[9px] font-medium ${tx.status === "settled" ? "bg-success-dim text-success" : "bg-surface-overlay text-text-muted"}`}>
                           {tx.status}
                         </button>
                       )}
@@ -863,7 +873,7 @@ export default function DashboardPage() {
             <div className={`${card} p-10 text-center`}>
               <p className="text-text-secondary">No accounts yet.</p>
               <p className="mt-2 text-sm text-text-muted">
-                Go to <Link href="/accounts" className="text-accent hover:text-accent-hover">Accounts</Link> to get started.
+                Go to <Link href="/accounts" className="text-text-primary underline underline-offset-2 hover:text-text-secondary">Accounts</Link> to get started.
               </p>
             </div>
           )}

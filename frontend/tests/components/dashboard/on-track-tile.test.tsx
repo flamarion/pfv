@@ -181,6 +181,22 @@ describe("OnTrackTile — past period", () => {
     expect(screen.getByRole("heading", { level: 2 })).not.toHaveTextContent(/^ENDED ON TRACK/);
   });
 
+  it("past + no-plan: renders past-tense non-actionable copy, no Set-one-up CTA", () => {
+    render(
+      <OnTrackTile
+        {...defaults({
+          forecastPlan: null,
+          projection: null,
+          isPastPeriod: true,
+        })}
+      />,
+    );
+    expect(screen.getByText(/No plan was set for this period\./)).toBeInTheDocument();
+    expect(screen.queryByText(/Set one up/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^This period$/)).not.toBeInTheDocument();
+    expect(screen.getByText(/^Past period$/)).toBeInTheDocument();
+  });
+
   it("renders FINAL SPENT column and suppresses PROJECTED column", () => {
     render(
       <OnTrackTile
