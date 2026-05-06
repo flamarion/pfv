@@ -31,6 +31,12 @@ def upgrade() -> None:
         sa.Column("org_id", sa.Integer, primary_key=True),
         sa.Column("acquired_by_user_id", sa.Integer, nullable=False),
         sa.Column("acquired_at", sa.DateTime, nullable=False),
+        # Per-acquire lease token. The release path requires WHERE
+        # token = :acquired_token so a stale-takeover can't be
+        # accidentally released by the original (long-stalled) caller
+        # — that would otherwise reopen the concurrent-reset window
+        # this whole table exists to close.
+        sa.Column("lease_token", sa.String(36), nullable=False),
         sa.ForeignKeyConstraint(
             ["org_id"], ["organizations.id"], ondelete="CASCADE",
         ),

@@ -328,7 +328,7 @@ async def test_reset_returns_409_if_lock_already_held(session_factory):
         acquired = await org_reset_lock_service.acquire_reset_lock(
             db, org_id=seed["org_id"], user_id=seed["owner_id"],
         )
-    assert acquired is True
+    assert acquired is not None  # acquire returns the lease token now
 
     app = make_app(session_factory, _resolver_for(Role.OWNER))
     with TestClient(app) as client:

@@ -54,10 +54,10 @@ async def reset_org_data(
     # duplicate defaults. Released in `finally` so a 500 still frees
     # the lock; stale locks self-recover after LOCK_TTL_MINUTES in
     # case a worker crashed mid-reset.
-    acquired = await org_reset_lock_service.acquire_reset_lock(
+    lease_token = await org_reset_lock_service.acquire_reset_lock(
         db, org_id=org_id, user_id=actor_user_id,
     )
-    if not acquired:
+    if lease_token is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -90,14 +90,14 @@ async def reset_org_data(
             error_type=type(e).__name__,
         )
         # Release the lock before raising so a retry isn't blocked.
-        await org_reset_lock_service.release_reset_lock(db, org_id=org_id)
+        await org_reset_lock_service.release_reset_lock(db, org_id=org_id, token=lease_token)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to reset organization data",
         )
 
     # Success path: release the lock so subsequent resets can run.
-    await org_reset_lock_service.release_reset_lock(db, org_id=org_id)
+    await org_reset_lock_service.release_reset_lock(db, org_id=org_id, token=lease_token)
 
     await logger.ainfo(
         "org.data.reset",

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Integer, DateTime, ForeignKey
+from sqlalchemy import Integer, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -35,3 +35,9 @@ class OrgDataResetLock(Base):
         nullable=False,
     )
     acquired_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # UUID4 hex string. Generated fresh on every acquire (whether
+    # an INSERT into an empty row or a stale-takeover UPDATE). The
+    # release path fences on `WHERE org_id = :id AND lease_token =
+    # :token`, so the original caller of a since-stale-taken-over
+    # lock cannot accidentally delete the successor's fresh lease.
+    lease_token: Mapped[str] = mapped_column(String(36), nullable=False)
