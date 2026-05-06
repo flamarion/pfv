@@ -94,6 +94,28 @@ def test_middleware_rejects_inbound_id_with_other_unsafe_chars():
             assert len(res.headers["x-request-id"]) == 32, bad
 
 
+def test_coerce_rejects_non_ascii_word_chars():
+    """Python's ``\\w`` is Unicode-aware by default; the frontend's
+    JavaScript ``\\w`` is ASCII-only. The backend regex carries the
+    ``re.ASCII`` flag so both edges reject the same shapes — letters
+    with diacritics, CJK, etc. all get replaced with a fresh UUID.
+
+    Tested at the coercion-function level rather than via TestClient
+    because httpx blocks non-ASCII header strings at the client side
+    (UnicodeEncodeError before transit). The middleware itself decodes
+    raw latin-1 bytes from ``scope["headers"]``, so a less strict
+    client could still deliver these byte sequences in production —
+    this test exercises the regex on the values the middleware would
+    actually see.
+    """
+    from app.middleware.request_context import _coerce_request_id
+
+    for bad in ("é", "trace-é", "漢字", "café", "naïve"):
+        coerced = _coerce_request_id(bad)
+        assert coerced != bad, bad
+        assert len(coerced) == 32, bad
+
+
 def test_middleware_clears_contextvars_between_requests():
     """A second request starts with a fresh scope — no stale state."""
     captured: list[dict] = []

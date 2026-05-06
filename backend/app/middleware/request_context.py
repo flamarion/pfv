@@ -44,12 +44,15 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 # and shuts the door on absurd header values.
 _MAX_INBOUND_LENGTH = 64
 
-# Strict character set: word chars (letters, digits, underscore),
-# dot, and hyphen. Mirrors the frontend proxy.ts policy exactly so
-# both edges of the system reject the same shapes — production API
-# requests bypass the frontend proxy and hit the backend directly,
-# so this regex is the real trust boundary.
-_SAFE_ID_RE = re.compile(r"^[\w.\-]+$")
+# Strict character set: ASCII word chars (letters, digits, underscore),
+# dot, and hyphen. Mirrors the frontend proxy.ts policy exactly. The
+# ``re.ASCII`` flag is mandatory: Python's ``\w`` is Unicode-aware by
+# default and would preserve ``é``, ``漢字``, etc., while the frontend's
+# JavaScript ``\w`` is ASCII-only. Production API requests bypass the
+# frontend proxy and hit the backend directly, so this regex is the
+# real trust boundary — character-set parity with the frontend has to
+# be exact.
+_SAFE_ID_RE = re.compile(r"^[\w.\-]+$", re.ASCII)
 
 
 def _coerce_request_id(raw: str | None) -> str:
