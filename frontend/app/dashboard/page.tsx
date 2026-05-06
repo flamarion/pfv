@@ -12,6 +12,7 @@ import { input, label, btnPrimary, btnSecondary, card, cardHeader, cardTitle, pa
 
 
 import { PieChart, Pie, BarChart, Bar, XAxis, YAxis, Cell, Tooltip, ResponsiveContainer } from "recharts";
+import { Check, Clock } from "lucide-react";
 import CategorySelect from "@/components/ui/CategorySelect";
 import OnTrackTile from "@/components/dashboard/OnTrackTile";
 import type { Account, BillingPeriod, Budget, Category, Transaction } from "@/lib/types";
@@ -862,8 +863,30 @@ export default function DashboardPage() {
                         {isTransfer ? "" : tx.type === "income" ? "+" : "-"}{formatAmount(tx.amount)}
                       </span>
                       {!isTransfer && (
-                        <button onClick={async () => { try { await apiFetch(`/api/v1/transactions/${tx.id}`, { method: "PUT", body: JSON.stringify({ status: tx.status === "settled" ? "pending" : "settled" }) }); await loadTransactions(page); await loadRefs(); void loadForecastProjection(); } catch (err) { setError(extractErrorMessage(err)); } }} aria-label={`Toggle status`} className={`rounded px-1 py-0.5 text-[9px] font-medium ${tx.status === "settled" ? "bg-success-dim text-success" : "bg-surface-overlay text-text-muted"}`}>
-                          {tx.status}
+                        <button
+                          onClick={async () => {
+                            try {
+                              await apiFetch(`/api/v1/transactions/${tx.id}`, {
+                                method: "PUT",
+                                body: JSON.stringify({ status: tx.status === "settled" ? "pending" : "settled" }),
+                              });
+                              await loadTransactions(page);
+                              await loadRefs();
+                              void loadForecastProjection();
+                            } catch (err) {
+                              setError(extractErrorMessage(err));
+                            }
+                          }}
+                          aria-label={`Mark ${tx.description} as ${tx.status === "settled" ? "pending" : "settled"}`}
+                          aria-pressed={tx.status === "settled"}
+                          className={`inline-flex min-h-[44px] items-center gap-1 rounded px-2 text-xs font-medium ${tx.status === "settled" ? "bg-success-dim text-success" : "bg-surface-overlay text-text-muted"}`}
+                        >
+                          {tx.status === "settled" ? (
+                            <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                          ) : (
+                            <Clock className="h-3.5 w-3.5" aria-hidden="true" />
+                          )}
+                          <span>{tx.status}</span>
                         </button>
                       )}
                     </div>
