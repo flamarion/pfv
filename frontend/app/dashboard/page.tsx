@@ -525,7 +525,7 @@ export default function DashboardPage() {
                 <button onClick={() => { const idx = periods.findIndex((p) => p.end_date === null); if (idx >= 0) { setPeriodIdx(idx); setChartFilter(null); } }} className="ml-1 rounded-md px-2 py-1 text-[11px] font-medium text-text-muted hover:bg-surface-raised">Today</button>
               )}
             </div>
-            <Link href="/transactions" className="text-xs text-accent hover:text-accent-hover">View All Transactions</Link>
+            <Link href="/transactions" className="text-xs text-text-secondary underline underline-offset-2 hover:text-text-primary">View All Transactions</Link>
           </div>
 
           {/* ═══ ROW 1: Executed | Forecast — two symmetric columns ═══ */}
@@ -632,8 +632,8 @@ export default function DashboardPage() {
                 {defaultAcct && (
                   <div className={`${card} px-5 py-3 sm:shrink-0 sm:min-w-[220px]`}>
                     <div className="flex items-center gap-2">
-                      <p className="text-[10px] font-semibold uppercase tracking-wider text-accent">{defaultAcct.name}</p>
-                      <span className="rounded bg-accent-dim px-1.5 py-0.5 text-[9px] font-semibold text-accent">PRIMARY</span>
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-text-primary">{defaultAcct.name}</p>
+                      <span className="rounded border border-border px-1.5 py-0.5 text-[9px] font-semibold text-text-secondary">PRIMARY</span>
                     </div>
                     <p className="mt-1 text-xl font-semibold tabular-nums text-text-primary">{formatAmount(defaultAcct.balance)} <span className="text-xs text-text-muted">{defaultAcct.currency}</span></p>
                     {pendingByAccount[defaultAcct.id] !== undefined && pendingByAccount[defaultAcct.id] !== 0 && (
@@ -665,7 +665,7 @@ export default function DashboardPage() {
             <div className={`${card} p-5`}>
               <h2 className={`mb-3 ${cardTitle}`}>Spending by Category</h2>
               {chartFilter && (
-                <button onClick={() => setChartFilter(null)} className="mb-2 rounded-md bg-accent-dim px-2.5 py-1 text-xs text-accent hover:bg-accent/20">
+                <button onClick={() => setChartFilter(null)} className="mb-2 rounded-md bg-surface-overlay px-2.5 py-1 text-xs text-text-secondary hover:bg-surface-raised">
                   Filtering: {chartFilter} &times;
                 </button>
               )}
@@ -694,7 +694,7 @@ export default function DashboardPage() {
                   <div className="w-full space-y-1.5 sm:flex-1">
                     {donutData.slice(0, 10).map((d, i) => (
                       <button key={d.name} onClick={() => setChartFilter(chartFilter === d.name ? null : d.name)}
-                        className={`flex w-full items-center justify-between rounded px-1.5 py-0.5 transition-colors hover:bg-surface-raised ${chartFilter === d.name ? "bg-accent-dim" : ""}`}>
+                        className={`flex w-full items-center justify-between rounded px-1.5 py-0.5 transition-colors hover:bg-surface-raised ${chartFilter === d.name ? "bg-surface-overlay" : ""}`}>
                         <div className="flex items-center gap-2">
                           <div className="h-2.5 w-2.5 rounded-full" style={{ background: CHART_COLORS[i % CHART_COLORS.length] }} />
                           <span className="text-xs text-text-secondary">{d.name}</span>
@@ -716,7 +716,7 @@ export default function DashboardPage() {
             <div className={`${card} overflow-hidden`}>
               <div className={`flex items-center justify-between ${cardHeader}`}>
                 <h2 className={cardTitle}>Budget Progress</h2>
-                <Link href="/budgets" className="text-xs text-accent hover:text-accent-hover">Manage</Link>
+                <Link href="/budgets" className="text-xs text-text-secondary underline underline-offset-2 hover:text-text-primary">Manage</Link>
               </div>
               {budgets.length > 0 ? (
                 <>
@@ -764,8 +764,8 @@ export default function DashboardPage() {
                   {isPastSelectedPeriod
                     ? <>No budgets were set for this period.</>
                     : isFutureSelectedPeriod
-                      ? <>Future budgets live in Forecasts. <Link href="/forecast-plans" className="text-accent">Plan ahead →</Link></>
-                      : <>No budgets for this period. <Link href="/budgets" className="text-accent">Add one</Link></>
+                      ? <>Future budgets live in Forecasts. <Link href="/forecast-plans" className="text-text-primary underline underline-offset-2 hover:text-text-secondary">Plan ahead →</Link></>
+                      : <>No budgets for this period. <Link href="/budgets" className="text-text-primary underline underline-offset-2 hover:text-text-secondary">Add one</Link></>
                   }
                 </div>
               )}
@@ -820,8 +820,8 @@ export default function DashboardPage() {
                     {isPastSelectedPeriod
                       ? <>No forecast was set for this period.</>
                       : isFutureSelectedPeriod
-                        ? <>No forecast for this future period. <Link href="/forecast-plans" className="text-accent">Plan ahead</Link>.</>
-                        : <>No forecast for this period. <Link href="/forecast-plans" className="text-accent">Set one up</Link>.</>
+                        ? <>No forecast for this future period. <Link href="/forecast-plans" className="text-text-primary underline underline-offset-2 hover:text-text-secondary">Plan ahead</Link>.</>
+                        : <>No forecast for this period. <Link href="/forecast-plans" className="text-text-primary underline underline-offset-2 hover:text-text-secondary">Set one up</Link>.</>
                     }
                   </p>
                 );
