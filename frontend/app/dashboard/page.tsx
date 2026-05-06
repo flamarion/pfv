@@ -95,6 +95,11 @@ export default function DashboardPage() {
   const [billingCycleDay, setBillingCycleDay] = useState(user?.billing_cycle_day ?? 1);
   const [periodIdx, setPeriodIdx] = useState(0);
   const [forecast, setForecast] = useState<ForecastPlan | null>(null);
+  // All-time pending transactions (no date filter). Pending is a status,
+  // not a period concept; a CC charge from October that's still pending
+  // in November must remain visible regardless of which period the user
+  // is viewing. Refreshed on writes via loadTransactions.
+  const [pendingTransactions, setPendingTransactions] = useState<Transaction[]>([]);
   const [forecastProjection, setForecastProjection] = useState<ForecastProjection | null>(null);
   const [projectionFailed, setProjectionFailed] = useState(false);
   const [projectionLoading, setProjectionLoading] = useState(false);
@@ -182,11 +187,15 @@ export default function DashboardPage() {
     const budgetUrl = realPeriodStart ? `/api/v1/budgets?period_start=${realPeriodStart}` : "/api/v1/budgets";
     const forecastUrl = realPeriodStart ? `/api/v1/forecast-plans/current?period_start=${realPeriodStart}` : "/api/v1/forecast-plans/current";
     const dateFilter = `date_from=${monthFrom}${monthTo ? `&date_to=${monthTo}` : ""}`;
-    const [pageData, allData, bds, fc] = await Promise.all([
+    const [pageData, allData, bds, fc, pendingData] = await Promise.all([
       apiFetch<Transaction[]>(`/api/v1/transactions?limit=${PAGE_SIZE + 1}&offset=${p * PAGE_SIZE}&${dateFilter}`),
       p === 0 ? apiFetch<Transaction[]>(`/api/v1/transactions?limit=200&${dateFilter}`) : null,
       p === 0 ? apiFetch<Budget[]>(budgetUrl) : null,
       p === 0 ? apiFetch<ForecastPlan | null>(forecastUrl) : null,
+      // All-time pending — no date filter. Closes the L3.4 gap where a
+      // pending charge from a prior period would disappear when the
+      // user navigated forward.
+      p === 0 ? apiFetch<Transaction[]>(`/api/v1/transactions?status=pending&limit=200`) : null,
     ]);
     const page_txs = pageData ?? [];
     setHasMore(page_txs.length > PAGE_SIZE);
@@ -195,6 +204,7 @@ export default function DashboardPage() {
     if (bds) setBudgets(bds);
     // null is a valid response (no plan yet) — set state so empty-state UI renders.
     if (p === 0) setForecast(fc ?? null);
+    if (pendingData) setPendingTransactions(pendingData);
     setFetching(false);
   }, [monthFrom, monthTo, realPeriodStart]);
 
@@ -387,14 +397,15 @@ export default function DashboardPage() {
   // Precompute tx map for O(1) linked lookups
   const txMap = new Map(allTransactions.map((tx) => [tx.id, tx]));
 
-  // Pending totals per account from all period transactions
-  const pendingByAccount = allTransactions
-    .filter((tx) => tx.status === "pending")
-    .reduce<Record<number, number>>((acc, tx) => {
-      const sign = tx.type === "income" ? 1 : -1;
-      acc[tx.account_id] = (acc[tx.account_id] || 0) + Number(tx.amount) * sign;
-      return acc;
-    }, {});
+  // Pending totals per account, computed from the all-time pending fetch
+  // (NOT from the period-filtered allTransactions). Pending CC charges
+  // must remain visible regardless of which billing period the user is
+  // viewing — pending is a status, not a date.
+  const pendingByAccount = pendingTransactions.reduce<Record<number, number>>((acc, tx) => {
+    const sign = tx.type === "income" ? 1 : -1;
+    acc[tx.account_id] = (acc[tx.account_id] || 0) + Number(tx.amount) * sign;
+    return acc;
+  }, {});
 
   // Spending by category from all period transactions. Transfer expense
   // halves carry linked_transaction_id; excluding them here stops transfers
