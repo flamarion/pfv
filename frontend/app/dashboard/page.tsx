@@ -620,7 +620,14 @@ export default function DashboardPage() {
           {/* ═══ ROW 2: Accounts — single row, primary slightly bigger ═══ */}
           {accountsWithBalance.length > 0 && (() => {
             const defaultAcct = accountsWithBalance.find((a) => a.is_default);
-            const others = accountsWithBalance.filter((a) => !a.is_default);
+            // Non-primary accounts sort alphabetically by name (locale-aware,
+            // case-insensitive). Stable across transactions: a coffee
+            // purchase can't reshuffle the strip the way a balance-desc
+            // sort would. Predictable position is the point.
+            const others = accountsWithBalance
+              .filter((a) => !a.is_default)
+              .slice()
+              .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
             return (
               <div className="grid grid-cols-1 gap-3 sm:flex sm:gap-3 sm:overflow-x-auto sm:pb-1">
                 {/* Primary account — wider */}
