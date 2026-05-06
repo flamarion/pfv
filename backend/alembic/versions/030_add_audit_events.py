@@ -35,7 +35,7 @@ def upgrade() -> None:
         "audit_events",
         sa.Column(
             "id",
-            sa.BigInteger().with_variant(sa.BigInteger(), "mysql"),
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
             primary_key=True,
             autoincrement=True,
         ),

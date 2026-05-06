@@ -183,7 +183,7 @@ export default function AdminAuditPage() {
                       {row.actor_email}
                     </td>
                     <td className="px-6 py-3 text-text-secondary">
-                      {row.target_org_name ?? "—"}
+                      {row.target_org_name ?? "-"}
                       {row.target_org_id != null && (
                         <span className="ml-1 text-text-muted">
                           (#{row.target_org_id})
@@ -208,7 +208,7 @@ export default function AdminAuditPage() {
                       {shortRequestId(row.request_id)}
                     </td>
                     <td className="px-6 py-3 font-mono text-xs text-text-muted">
-                      {row.ip_address ?? "—"}
+                      {row.ip_address ?? "-"}
                     </td>
                   </tr>
                 ))}
