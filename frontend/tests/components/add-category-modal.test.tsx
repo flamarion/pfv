@@ -230,6 +230,37 @@ describe("AddCategoryModal", () => {
     expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
+  it("disables Add category and shows hint when subcategory is checked but no parent picked", () => {
+    render(
+      <AddCategoryModal
+        initialName="Mortgage"
+        initialType="expense"
+        masterCategories={masterCategories}
+        onCreated={vi.fn()}
+        onCancel={vi.fn()}
+      />
+    );
+
+    // With a name filled in but no subcategory toggle, submit is enabled.
+    const submit = screen.getByRole("button", { name: /Add category/i });
+    expect(submit).not.toBeDisabled();
+
+    // Toggling Subcategory (without picking a parent) must disable submit
+    // and surface the inline hint.
+    fireEvent.click(screen.getByLabelText(/Subcategory/i));
+    expect(submit).toBeDisabled();
+    expect(screen.getByText(/Pick a parent category/i)).toBeInTheDocument();
+
+    // Selecting a parent re-enables submit and removes the hint.
+    fireEvent.change(screen.getByLabelText(/Parent category/i), {
+      target: { value: "1" },
+    });
+    expect(submit).not.toBeDisabled();
+    expect(
+      screen.queryByText(/Pick a parent category/i)
+    ).not.toBeInTheDocument();
+  });
+
   it("Escape key calls onCancel", () => {
     const onCancel = vi.fn();
     render(

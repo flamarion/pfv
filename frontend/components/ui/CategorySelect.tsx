@@ -123,8 +123,13 @@ export default function CategorySelect({ id, categories, value, onChange, filter
     items[highlightIdx]?.scrollIntoView({ block: "nearest" });
   }, [highlightIdx]);
 
-  // Group non-recent by master for display
-  const masters = categories.filter((c) => c.parent_id === null);
+  // Group non-recent by master for display.
+  // Memoized so the `grouped` useMemo below sees a stable `masters`
+  // reference and only recomputes when the categories list itself changes.
+  const masters = useMemo(
+    () => categories.filter((c) => c.parent_id === null),
+    [categories]
+  );
   const grouped = useMemo(() => {
     const groups: { label: string; items: Category[] }[] = [];
     for (const master of masters) {

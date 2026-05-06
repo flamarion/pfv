@@ -89,7 +89,12 @@ export default function AddCategoryModal({
   }, [submitting, onCancel]);
 
   const trimmedName = name.trim();
-  const canSubmit = trimmedName.length > 0 && trimmedName.length <= 100 && !submitting;
+  const needsParent = isSub && parentId === "";
+  const canSubmit =
+    trimmedName.length > 0 &&
+    trimmedName.length <= 100 &&
+    !submitting &&
+    !needsParent;
 
   async function handleSubmit() {
     if (!canSubmit) return;
@@ -206,6 +211,10 @@ export default function AddCategoryModal({
                   )
                 }
                 className={input}
+                aria-describedby={
+                  needsParent ? "add-cat-parent-help" : undefined
+                }
+                aria-invalid={needsParent || undefined}
               >
                 <option value="">Select a parent...</option>
                 {masterCategories.map((c) => (
@@ -214,6 +223,14 @@ export default function AddCategoryModal({
                   </option>
                 ))}
               </select>
+              {needsParent && (
+                <p
+                  id="add-cat-parent-help"
+                  className="mt-1 text-xs text-text-muted"
+                >
+                  Pick a parent category
+                </p>
+              )}
             </div>
           )}
 
