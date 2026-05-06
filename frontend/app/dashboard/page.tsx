@@ -358,7 +358,13 @@ export default function DashboardPage() {
       return dashSortDir === "asc" ? cmp : -cmp;
     });
 
-  const CHART_COLORS = ["#D4A64A", "#5FA8D3", "#4ade80", "#f87171", "#a78bfa", "#fb923c", "#38bdf8", "#e879f9", "#34d399", "#fbbf24"];
+  const CHART_COLORS = [
+    "var(--color-chart-1)",
+    "var(--color-chart-2)",
+    "var(--color-chart-3)",
+    "var(--color-chart-4)",
+    "var(--color-chart-5)",
+  ];
 
   return (
     <AppShell>
@@ -379,7 +385,7 @@ export default function DashboardPage() {
       {resetBanner && (
         <div
           data-testid="reset-banner"
-          className="mb-4 flex items-start justify-between gap-3 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-4"
+          className="mb-4 flex items-start justify-between gap-3 rounded-md border border-success/40 bg-success-dim p-4"
         >
           <div className="text-sm text-text-primary">
             <strong>Your data has been reset.</strong> Welcome back to a clean slate.
@@ -723,11 +729,11 @@ export default function DashboardPage() {
                       pct: b.percent_used,
                     }))} layout="vertical" margin={{ left: 0, right: 20, top: 0, bottom: 0 }}>
                       <XAxis type="number" hide />
-                      <YAxis type="category" dataKey="name" width={100} tick={{ fill: "#9ba8bd", fontSize: 11 }} />
+                      <YAxis type="category" dataKey="name" width={100} tick={{ fill: "var(--color-text-secondary)", fontSize: 11 }} />
                       <Tooltip
                         formatter={(v, name) => [
                           formatAmount(Number(v)),
-                          name === "spent" ? <span style={{ color: "#f87171" }}>Spent</span> : <span style={{ color: "#4ade80" }}>Remaining</span>,
+                          name === "spent" ? <span style={{ color: "var(--color-chart-5)" }}>Spent</span> : <span style={{ color: "var(--color-chart-2)" }}>Remaining</span>,
                         ]}
                         contentStyle={{ fontSize: "11px" }}
                       />
@@ -739,18 +745,18 @@ export default function DashboardPage() {
                         }}
                       >
                         {budgets.slice(0, 6).map((b, i) => (
-                          <Cell key={i} fill={b.percent_used > 100 ? "#f87171" : b.percent_used > 80 ? "#f59e0b" : "#D4A64A"} />
+                          <Cell key={i} fill={b.percent_used > 100 ? "var(--color-chart-5)" : b.percent_used > 80 ? "var(--color-chart-4)" : "var(--color-chart-1)"} />
                         ))}
                       </Bar>
-                      <Bar dataKey="remaining" stackId="a" fill="#e8ebf0" radius={[0, 4, 4, 0]} animationDuration={600} />
+                      <Bar dataKey="remaining" stackId="a" fill="var(--color-border)" radius={[0, 4, 4, 0]} animationDuration={600} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
                 <div className="flex flex-wrap gap-3 px-4 pb-3 text-[10px] text-text-muted">
-                  <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#D4A64A" }} /> Spent</span>
-                  <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#f59e0b" }} /> &gt;80%</span>
-                  <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#f87171" }} /> Over budget</span>
-                  <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#e8ebf0" }} /> Remaining</span>
+                  <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--color-chart-1)" }} /> Spent</span>
+                  <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--color-chart-4)" }} /> &gt;80%</span>
+                  <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--color-chart-5)" }} /> Over budget</span>
+                  <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--color-border)" }} /> Remaining</span>
                 </div>
                 </>
               ) : (
@@ -788,20 +794,20 @@ export default function DashboardPage() {
                           <Tooltip
                             formatter={(v, name) => [
                               formatAmount(Number(v)),
-                              name === "planned" ? <span style={{ color: "#D4A64A" }}>Planned</span> : <span style={{ color: "#4ade80" }}>Actual</span>,
+                              name === "planned" ? <span style={{ color: "var(--color-chart-1)" }}>Planned</span> : <span style={{ color: "var(--color-chart-2)" }}>Actual</span>,
                             ]}
                             contentStyle={{ fontSize: "11px" }}
                           />
-                          <Bar dataKey="planned" fill="#D4A64A" radius={[4, 4, 4, 4]} animationDuration={600}
+                          <Bar dataKey="planned" fill="var(--color-chart-1)" radius={[4, 4, 4, 4]} animationDuration={600}
                             cursor="pointer"
                             onClick={(_, idx) => {
                               const name = expenseItems[idx]?.category_name;
                               if (name) setChartFilter(chartFilter === name ? null : name);
                             }}
                           />
-                          <Bar dataKey="actual" fill="#4ade80" radius={[4, 4, 4, 4]} animationDuration={600}>
+                          <Bar dataKey="actual" fill="var(--color-chart-2)" radius={[4, 4, 4, 4]} animationDuration={600}>
                             {expenseItems.slice(0, 8).map((it, i) => (
-                              <Cell key={i} fill={Number(it.actual_amount) > Number(it.planned_amount) ? "#f87171" : "#4ade80"} />
+                              <Cell key={i} fill={Number(it.actual_amount) > Number(it.planned_amount) ? "var(--color-chart-5)" : "var(--color-chart-2)"} />
                             ))}
                           </Bar>
                         </BarChart>
@@ -821,9 +827,9 @@ export default function DashboardPage() {
                 );
               })()}
               <div className="mt-2 flex gap-3 text-[10px] text-text-muted">
-                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#D4A64A" }} /> Planned</span>
-                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#4ade80" }} /> Under plan</span>
-                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#f87171" }} /> Over plan</span>
+                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--color-chart-1)" }} /> Planned</span>
+                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--color-chart-2)" }} /> Under plan</span>
+                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--color-chart-5)" }} /> Over plan</span>
               </div>
             </div>
           </div>
