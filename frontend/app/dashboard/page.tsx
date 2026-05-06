@@ -854,7 +854,6 @@ export default function DashboardPage() {
                         <p className="text-sm text-text-primary truncate">{tx.description}</p>
                         <p className="text-[11px] text-text-muted truncate">
                           {isTransfer && linkedTx ? <>{tx.account_name} &rarr; {linkedTx.account_name}</> : <>{tx.account_name} · {tx.category_name}</>}
-                          {tx.status === "pending" && <span className="ml-1 rounded bg-surface-overlay px-1 py-0.5 text-[9px] font-medium text-text-muted">pending</span>}
                         </p>
                       </div>
                     </div>
@@ -877,7 +876,7 @@ export default function DashboardPage() {
                               setError(extractErrorMessage(err));
                             }
                           }}
-                          aria-label={`Mark ${tx.description} as ${tx.status === "settled" ? "pending" : "settled"}`}
+                          aria-label={`Settled status for ${tx.description}`}
                           aria-pressed={tx.status === "settled"}
                           className={`inline-flex min-h-[44px] items-center gap-1 rounded px-2 text-xs font-medium ${tx.status === "settled" ? "bg-success-dim text-success" : "bg-surface-overlay text-text-muted"}`}
                         >
