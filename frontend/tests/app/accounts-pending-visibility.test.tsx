@@ -97,7 +97,8 @@ describe("AccountsPage — pending visibility (L3.4)", () => {
     vi.mocked(apiFetch).mockImplementation(((url: string) => {
       if (url === "/api/v1/account-types") return Promise.resolve(ACCOUNT_TYPES);
       if (url === "/api/v1/accounts") return Promise.resolve(ACCOUNTS);
-      if (url === "/api/v1/transactions?status=pending&limit=200") return Promise.resolve(pending);
+      // fetchAll<T> appends &limit=200&offset=N; match the prefix.
+      if (url.startsWith("/api/v1/transactions?status=pending")) return Promise.resolve(pending);
       return Promise.resolve({});
     }) as never);
   }

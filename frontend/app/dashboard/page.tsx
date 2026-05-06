@@ -7,6 +7,7 @@ import AppShell from "@/components/AppShell";
 import Spinner from "@/components/ui/Spinner";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { apiFetch, extractErrorMessage } from "@/lib/api";
+import { fetchAll } from "@/lib/pagination";
 import { formatAmount, formatLocalDate, projectedPeriodEnd, todayISO } from "@/lib/format";
 import { input, label, btnPrimary, btnSecondary, card, cardHeader, cardTitle, pageTitle, error as errorCls } from "@/lib/styles";
 
@@ -98,8 +99,14 @@ export default function DashboardPage() {
   // All-time pending transactions (no date filter). Pending is a status,
   // not a period concept; a CC charge from October that's still pending
   // in November must remain visible regardless of which period the user
-  // is viewing. Refreshed on writes via loadTransactions.
+  // is viewing. Refreshed on every write — independent of the visible
+  // transaction page (the status toggle on page 2 still needs to refresh
+  // the strip's pending totals).
   const [pendingTransactions, setPendingTransactions] = useState<Transaction[]>([]);
+  // Counter-ref guard for the pending fetch. Two writes in quick
+  // succession can issue two pending refetches; only the latest one is
+  // allowed to commit state. Same pattern as projectionRequestId below.
+  const pendingRequestId = useRef(0);
   const [forecastProjection, setForecastProjection] = useState<ForecastProjection | null>(null);
   const [projectionFailed, setProjectionFailed] = useState(false);
   const [projectionLoading, setProjectionLoading] = useState(false);
@@ -187,15 +194,11 @@ export default function DashboardPage() {
     const budgetUrl = realPeriodStart ? `/api/v1/budgets?period_start=${realPeriodStart}` : "/api/v1/budgets";
     const forecastUrl = realPeriodStart ? `/api/v1/forecast-plans/current?period_start=${realPeriodStart}` : "/api/v1/forecast-plans/current";
     const dateFilter = `date_from=${monthFrom}${monthTo ? `&date_to=${monthTo}` : ""}`;
-    const [pageData, allData, bds, fc, pendingData] = await Promise.all([
+    const [pageData, allData, bds, fc] = await Promise.all([
       apiFetch<Transaction[]>(`/api/v1/transactions?limit=${PAGE_SIZE + 1}&offset=${p * PAGE_SIZE}&${dateFilter}`),
       p === 0 ? apiFetch<Transaction[]>(`/api/v1/transactions?limit=200&${dateFilter}`) : null,
       p === 0 ? apiFetch<Budget[]>(budgetUrl) : null,
       p === 0 ? apiFetch<ForecastPlan | null>(forecastUrl) : null,
-      // All-time pending — no date filter. Closes the L3.4 gap where a
-      // pending charge from a prior period would disappear when the
-      // user navigated forward.
-      p === 0 ? apiFetch<Transaction[]>(`/api/v1/transactions?status=pending&limit=200`) : null,
     ]);
     const page_txs = pageData ?? [];
     setHasMore(page_txs.length > PAGE_SIZE);
@@ -204,9 +207,26 @@ export default function DashboardPage() {
     if (bds) setBudgets(bds);
     // null is a valid response (no plan yet) — set state so empty-state UI renders.
     if (p === 0) setForecast(fc ?? null);
-    if (pendingData) setPendingTransactions(pendingData);
     setFetching(false);
   }, [monthFrom, monthTo, realPeriodStart]);
+
+  // All-time pending refetch. Decoupled from loadTransactions so it
+  // refreshes on writes regardless of which transaction page is visible:
+  // a status toggle on page 2 must still update the accounts strip.
+  // Paginated through fetchAll<Transaction> so the limit=200 cap can't
+  // silently drop older unresolved pending charges.
+  const loadPendingTransactions = useCallback(async () => {
+    const myId = ++pendingRequestId.current;
+    try {
+      const all = await fetchAll<Transaction>("/api/v1/transactions?status=pending");
+      if (pendingRequestId.current !== myId) return;
+      setPendingTransactions(all);
+    } catch {
+      // Pending failures are noisy but non-fatal — silently keep the
+      // last good snapshot. The dashboard error banner already surfaces
+      // the real problem if loadRefs / loadTransactions also failed.
+    }
+  }, []);
 
   // Loads the forecast projection from /api/v1/forecast for the
   // currently-selected billing period. Separate from loadTransactions
@@ -260,8 +280,10 @@ export default function DashboardPage() {
       loadRefs().catch((err) => {
         setError(extractErrorMessage(err, "Failed to load dashboard data"));
       });
+      // Pending is independent of period and refs; load alongside.
+      void loadPendingTransactions();
     }
-  }, [loading, user, loadRefs]);
+  }, [loading, user, loadRefs, loadPendingTransactions]);
 
   useEffect(() => {
     // Gate the period-scoped load on a real billing period being in
@@ -356,6 +378,9 @@ export default function DashboardPage() {
       // we re-call /api/v1/forecast, otherwise the page's primary answer
       // ("are we on track?") can be wrong.
       void loadForecastProjection();
+      // Pending charges may have changed (a settled-on-create or a manual
+      // pending entry); refresh independent of the visible page index.
+      void loadPendingTransactions();
     } catch (err) {
       setError(extractErrorMessage(err));
     }
@@ -890,6 +915,9 @@ export default function DashboardPage() {
                               await loadTransactions(page);
                               await loadRefs();
                               void loadForecastProjection();
+                              // Independent of `page` — a toggle on page 2
+                              // still has to refresh the strip's totals.
+                              void loadPendingTransactions();
                             } catch (err) {
                               setError(extractErrorMessage(err));
                             }

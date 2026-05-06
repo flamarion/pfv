@@ -5,6 +5,7 @@ import AppShell from "@/components/AppShell";
 import Spinner from "@/components/ui/Spinner";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { apiFetch, extractErrorMessage } from "@/lib/api";
+import { fetchAll } from "@/lib/pagination";
 import { formatAmount } from "@/lib/format";
 import { input, label, btnPrimary, card, cardHeader, cardTitle, error as errorCls, pageTitle } from "@/lib/styles";
 import type { Account, AccountType, Transaction } from "@/lib/types";
@@ -45,7 +46,9 @@ export default function AccountsPage() {
     const [types, accts, pending] = await Promise.all([
       apiFetch<AccountType[]>("/api/v1/account-types"),
       apiFetch<Account[]>("/api/v1/accounts"),
-      apiFetch<Transaction[]>("/api/v1/transactions?status=pending&limit=200"),
+      // Paged so the per-page limit (200 server-side) can't drop older
+      // unresolved pending charges from the per-account totals.
+      fetchAll<Transaction>("/api/v1/transactions?status=pending"),
     ]);
     setAccountTypes(types ?? []);
     setAccounts(accts ?? []);
