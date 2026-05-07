@@ -134,7 +134,7 @@ def _category_type_matches(
 ) -> bool:
     """Pure compatibility check between a CategoryType and a TransactionType.
 
-    BOTH always matches. TRANSFER is rejected — transactions on the create/
+    BOTH always matches. TRANSFER is rejected, transactions on the create/
     update path are never user-typed as TRANSFER (transfer legs are typed
     EXPENSE/INCOME at the leg level).
     """
@@ -145,6 +145,33 @@ def _category_type_matches(
     if tx_type == TransactionType.EXPENSE:
         return cat_type == CategoryType.EXPENSE
     return False
+
+
+async def validate_transfer_category(
+    db: AsyncSession, category_id: int, org_id: int,
+) -> None:
+    """Validate a user-supplied transfer category.
+
+    A transfer pair shares one category across both legs (expense and income).
+    Anything other than CategoryType.BOTH is structurally wrong: the opposite
+    leg would end up with a one-sided category that fails the same
+    (type, category) compatibility rule enforced on regular writes.
+
+    Raises ValidationError when the category is missing, cross-org, or
+    not CategoryType.BOTH. Mapped by app.main.validation_handler to HTTP 400.
+    """
+    cat = await db.scalar(
+        select(Category).where(
+            Category.id == category_id, Category.org_id == org_id
+        )
+    )
+    if cat is None:
+        raise ValidationError("Invalid category")
+    if cat.type != CategoryType.BOTH:
+        raise ValidationError(
+            "Transfer category must accept both income and expense "
+            f"(got type={cat.type.value})"
+        )
 
 
 async def get_account_for_update(db: AsyncSession, account_id: int, org_id: int) -> Account:
@@ -813,7 +840,10 @@ async def _link_pair(
                 await db.flush()
                 cat_id = new_cat.id
         else:
-            await validate_category(db, cat_id, expense_tx.org_id)
+            # Both legs share one category, anything other than BOTH would
+            # leave the opposite leg with a one-sided category that fails
+            # the (type, category) compatibility guard.
+            await validate_transfer_category(db, cat_id, expense_tx.org_id)
         expense_tx.category_id = cat_id
         income_tx.category_id = cat_id
 
@@ -1248,7 +1278,9 @@ async def create_transfer(
             transfer_cat = new_cat.id
         category_id = transfer_cat
     else:
-        await validate_category(db, category_id, org_id)
+        # Both legs share one category, a one-sided category would leave
+        # the opposite leg with an incompatible (type, category) pair.
+        await validate_transfer_category(db, category_id, org_id)
 
     tx_status = TransactionStatus(body.status)
 
