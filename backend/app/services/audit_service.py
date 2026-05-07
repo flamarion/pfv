@@ -106,12 +106,14 @@ async def record_audit_event(
             ))
             await session.commit()
     except Exception as exc:  # noqa: BLE001 — defensive: never bubble.
-        # Backstop: keep the swallow but escalate to WARN so an alert
-        # can be wired up later. After PR-C the org-delete success
-        # path no longer relies on this swallow (it writes in the
-        # business txn before the delete), so any audit.record.failed
-        # signal is a genuine problem worth surfacing.
-        await logger.awarning(
+        # Kept as a backstop. Logged at ERROR so a regression in a
+        # caller that doesn't pre-snapshot (like the original
+        # org-delete path) surfaces immediately. After PR-C the
+        # org-delete success path stages its audit row in the
+        # business txn via add_audit_event_to_session, so any
+        # audit.record.failed signal here is a genuine problem
+        # worth alerting on.
+        await logger.aerror(
             "audit.record.failed",
             event_type=event_type,
             actor_user_id=actor_user_id,
