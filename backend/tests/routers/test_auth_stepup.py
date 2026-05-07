@@ -213,11 +213,11 @@ async def test_callback_with_default_state_redirects_to_settings(
         init = client.post("/api/v1/auth/sso-stepup/initiate")
         assert init.status_code == 200
         state = init.cookies.get("oauth_state")
+        client.cookies.set("oauth_state", state)
 
         callback = client.get(
             "/api/v1/auth/sso-stepup/callback",
             params={"code": "fake-google-code", "state": state},
-            cookies={"oauth_state": state},
             follow_redirects=False,
         )
 
@@ -275,11 +275,11 @@ async def test_callback_with_security_state_redirects_with_issued_token(
         )
         assert init.status_code == 200
         state = init.cookies.get("oauth_state")
+        client.cookies.set("oauth_state", state)
 
         callback = client.get(
             "/api/v1/auth/sso-stepup/callback",
             params={"code": "fake-google-code", "state": state},
-            cookies={"oauth_state": state},
             follow_redirects=False,
         )
 
@@ -361,11 +361,11 @@ async def test_callback_with_attacker_target_redirects_to_default(
         )
         assert init.status_code == 200
         state = init.cookies.get("oauth_state")
+        client.cookies.set("oauth_state", state)
 
         callback = client.get(
             "/api/v1/auth/sso-stepup/callback",
             params={"code": "fake-google-code", "state": state},
-            cookies={"oauth_state": state},
             follow_redirects=False,
         )
 
@@ -401,10 +401,10 @@ async def test_callback_rejects_malformed_state(
     app = _make_app(session_factory, user_id)
 
     with TestClient(app) as client:
+        client.cookies.set("oauth_state", bad_state)
         res = client.get(
             "/api/v1/auth/sso-stepup/callback",
             params={"code": "fake-google-code", "state": bad_state},
-            cookies={"oauth_state": bad_state},
             follow_redirects=False,
         )
 
