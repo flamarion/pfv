@@ -44,6 +44,15 @@ docker compose exec backend alembic revision -m "description"
 # Rebuild after dependency changes
 docker compose up --build -d backend
 docker compose up --build -d frontend
+
+# Backend tests (run inside the backend container)
+docker compose exec backend pytest tests/...
+
+# Frontend tests
+docker compose exec frontend npm test -- tests/...
+
+# TypeScript type-check
+docker compose exec frontend npx tsc --noEmit
 ```
 
 ## Seeding
@@ -96,6 +105,8 @@ frontend/
 - **Auth on every endpoint** — use `get_current_user` dependency. Only /health, /ready, /api/v1/auth/login, /api/v1/auth/register, /api/v1/auth/refresh are public.
 - **Enum values** — SQLAlchemy enums use `values_callable=lambda x: [e.value for e in x]` to store lowercase values in MySQL
 - **Frontend has two Dockerfiles** — `Dockerfile.dev` for local dev (hot reload with volume mounts), `Dockerfile` for production (multi-stage standalone build, ~slim image)
-- **nginx is the single entry point** — backend and frontend only expose ports internally. `/api/*` routes to FastAPI, everything else to Next.js. FastAPI's Swagger UI is served at `/api/docs` (with `/api/openapi.json`) so `/docs` is free for the public in-app user manual served by Next.js.
+- **nginx is the single entry point in dev** — backend and frontend only expose ports internally. `/api/*` routes to FastAPI, everything else to Next.js. FastAPI's Swagger UI is served at `/api/docs` (with `/api/openapi.json`) so `/docs` is free for the public in-app user manual served by Next.js. In production (DO App Platform) ingress takes nginx's role.
+- **Production data plane is self-hosted** — MySQL 8 and Redis run on a single dedicated DO droplet (`pfv-data-01`) in a private VPC; App Platform reaches them over the VPC's private IPv4. Runbook lives in `infra/MIGRATION.md`. Terraform is VCS-driven via TFC (workspace `FlamaCorp/pfv`), with manual Confirm & Apply on merge.
+- **Sensitive admin / org actions are audited** — org rename, org-data wipe, override sweep, role edits, etc. write to `audit_events` and surface in `/admin/audit`.
 
 
