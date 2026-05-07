@@ -167,6 +167,19 @@ async def test_list_audit_events_filters_by_outcome(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_list_audit_events_invalid_outcome_raises(session_factory):
+    """Service-direct callers (and old swallow) used to silently skip
+    the filter on a typo. PR-C tightens this: the route layer types
+    the param as Literal so FastAPI rejects, and the service raises
+    ValueError so any direct caller (tests, ad-hoc scripts) sees the
+    typo loudly."""
+    await _seed_three(session_factory)
+    async with session_factory() as db:
+        with pytest.raises(ValueError):
+            await list_audit_events(db, outcome="failuer")
+
+
+@pytest.mark.asyncio
 async def test_list_audit_events_date_range(session_factory):
     await _seed_three(session_factory)
     async with session_factory() as db:

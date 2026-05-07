@@ -505,7 +505,18 @@ async def test_sweep_writes_audit_event(session_factory):
     assert row.actor_email == seed["admin_email"]
     assert row.target_org_id is None
     assert row.target_org_name is None
-    assert row.detail == {"deleted_count": 2}
+    # PR-C: bounded detail with per-row entries + counts.
+    assert row.detail["deleted_count"] == 2
+    assert row.detail["truncated_count"] == 0
+    assert sorted(e["feature_key"] for e in row.detail["entries"]) == (
+        ["ai.budget", "ai.forecast"]
+    )
+    # All entries reference the seeded target org.
+    assert {e["org_id"] for e in row.detail["entries"]} == {seed["target_id"]}
+    assert row.detail["counts_by_feature"] == {
+        "ai.budget": 1,
+        "ai.forecast": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -530,7 +541,79 @@ async def test_sweep_idempotent_when_nothing_expired(session_factory):
             )
         ).scalars().all()
     assert len(rows) == 1
-    assert rows[0].detail == {"deleted_count": 0}
+    # No expirees: zero counts everywhere, empty entries list.
+    assert rows[0].detail["deleted_count"] == 0
+    assert rows[0].detail["truncated_count"] == 0
+    assert rows[0].detail["entries"] == []
+    assert rows[0].detail["counts_by_feature"] == {}
+
+
+@pytest.mark.asyncio
+async def test_sweep_truncates_audit_entries_over_cap(session_factory):
+    """When > _SWEEP_AUDIT_ENTRY_CAP rows are deleted, the audit
+    detail caps the per-row `entries` list and surfaces the rest as
+    `truncated_count` plus `counts_by_feature`.
+
+    Pre-PR-C the audit row only carried `deleted_count`, so an ops
+    person investigating a sweep could only see the total — not which
+    orgs/features lost access.
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import select as _select
+
+    from app._time import utcnow_naive
+    from app.models.user import Organization
+    from app.routers.admin_orgs import _SWEEP_AUDIT_ENTRY_CAP
+
+    seed = await _seed(session_factory)
+    cap = _SWEEP_AUDIT_ENTRY_CAP
+    over_cap = cap + 5
+    past = utcnow_naive() - timedelta(hours=1)
+
+    # Need many distinct orgs because of the UNIQUE(org_id, feature_key).
+    # Plant a single expired override per fresh org, alternating between
+    # two keys so counts_by_feature is non-trivial.
+    async with session_factory() as db:
+        orgs = [
+            Organization(name=f"OrgX-{i}", billing_cycle_day=1)
+            for i in range(over_cap)
+        ]
+        db.add_all(orgs)
+        await db.commit()
+        for i, org in enumerate(orgs):
+            db.add(
+                OrgFeatureOverride(
+                    org_id=org.id,
+                    feature_key=("ai.budget" if i % 2 == 0 else "ai.forecast"),
+                    value=True,
+                    set_by=seed["admin_user_id"],
+                    expires_at=past,
+                )
+            )
+        await db.commit()
+
+    app = make_app(session_factory, _superadmin_resolver())
+    with TestClient(app) as client:
+        res = client.post("/api/v1/admin/orgs/feature-overrides/sweep-expired")
+    assert res.status_code == 200
+    assert res.json()["deleted_count"] == over_cap
+
+    async with session_factory() as db:
+        row = (
+            await db.execute(
+                _select(AuditEvent).where(
+                    AuditEvent.event_type
+                    == "admin.feature_override.expired_swept"
+                )
+            )
+        ).scalars().one()
+    assert row.detail["deleted_count"] == over_cap
+    assert len(row.detail["entries"]) == cap
+    assert row.detail["truncated_count"] == over_cap - cap
+    # Aggregate counts cover ALL deleted rows, not just the entries list.
+    total_via_counts = sum(row.detail["counts_by_feature"].values())
+    assert total_via_counts == over_cap
 
 
 @pytest.mark.asyncio
