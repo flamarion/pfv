@@ -302,43 +302,98 @@ async def sweep_expired_feature_overrides(
     ``counts_by_feature`` carry the rest.
     """
     cutoff = utcnow_naive()
-    # SELECT the rows that will be deleted FIRST so we can record their
-    # identity in the audit row. Reading and deleting in the same txn
-    # guarantees the audit summary is exactly what was removed.
-    expiring_rows = (
+    # Lock-then-delete-by-id so the audit summary describes rows this
+    # sweep actually removed, not rows it merely observed.
+    #
+    # The previous SELECT-then-DELETE-by-predicate pattern was racy:
+    # two overlapping sweeps could each snapshot the same expired rows
+    # (predicate-equal), the first DELETE removed them, and the second
+    # DELETE matched nothing yet still audited
+    # ``deleted_count = len(snapshot)`` plus per-row entries for rows
+    # it never touched. With FOR UPDATE on InnoDB the second sweep
+    # blocks until the first commits, then locks zero rows; with
+    # DELETE-by-id and rowcount-driven counts, even a non-locking
+    # dialect (e.g. tests on SQLite) can't drift out of sync because
+    # the audit numbers come from the actual rows removed.
+    locked_rows = (
         await db.execute(
             select(OrgFeatureOverride)
             .where(OrgFeatureOverride.expires_at.is_not(None))
             .where(OrgFeatureOverride.expires_at <= cutoff)
             .order_by(OrgFeatureOverride.org_id, OrgFeatureOverride.feature_key)
+            .with_for_update()
         )
     ).scalars().all()
-    deleted_count = len(expiring_rows)
 
-    # Build the bounded audit detail. counts_by_feature is the
-    # truth-as-aggregate; entries is a capped sample for spot-checks.
-    counts_by_feature: dict[str, int] = {}
-    for row in expiring_rows:
-        counts_by_feature[row.feature_key] = (
-            counts_by_feature.get(row.feature_key, 0) + 1
-        )
-    entries = [
-        {
+    # Snapshot identity for the audit detail BEFORE the delete; after
+    # commit the in-memory rows are detached and SQLAlchemy's
+    # expire-on-commit would invalidate attribute access.
+    locked_by_id = {
+        row.id: {
             "org_id": row.org_id,
             "feature_key": row.feature_key,
             "value": row.value,
             "expires_at": row.expires_at.isoformat() if row.expires_at else None,
         }
-        for row in expiring_rows[:_SWEEP_AUDIT_ENTRY_CAP]
-    ]
+        for row in locked_rows
+    }
+    locked_ids = list(locked_by_id.keys())
+
+    deleted_ids: list[int] = []
+    if locked_ids:
+        delete_result = await db.execute(
+            delete(OrgFeatureOverride).where(OrgFeatureOverride.id.in_(locked_ids))
+        )
+        affected = delete_result.rowcount
+        if affected is None or affected == len(locked_ids):
+            # Happy path on every locking dialect we care about.
+            # ``rowcount`` of -1/None on a dialect that doesn't report
+            # affected rows is treated as the all-locked-deleted case;
+            # FOR UPDATE held the rows in InnoDB so this is safe.
+            deleted_ids = locked_ids
+        else:
+            # Divergence: between SELECT FOR UPDATE and DELETE, some
+            # rows disappeared (out-of-band delete, concurrent sweep
+            # without locking, or a non-InnoDB dialect). Trust the
+            # rowcount and report only the rows that actually went
+            # away under our DELETE.
+            await logger.awarning(
+                "admin.feature_override.sweep.lock_delete_mismatch",
+                locked_count=len(locked_ids),
+                deleted_count=affected,
+            )
+            still_present = set(
+                (
+                    await db.execute(
+                        select(OrgFeatureOverride.id).where(
+                            OrgFeatureOverride.id.in_(locked_ids)
+                        )
+                    )
+                ).scalars().all()
+            )
+            absent_ids = [i for i in locked_ids if i not in still_present]
+            # Cap absent_ids by the affected count so we don't audit
+            # rows another actor removed. When absent > affected,
+            # someone else won those deletes; pick the first ``affected``
+            # in the locked order to keep audit ordering stable.
+            deleted_ids = absent_ids[:affected]
+
+    deleted_count = len(deleted_ids)
+
+    # Build the bounded audit detail from rows the sweep ACTUALLY
+    # removed. counts_by_feature is the truth-as-aggregate; entries is
+    # a capped sample for spot-checks.
+    counts_by_feature: dict[str, int] = {}
+    entries: list[dict] = []
+    for row_id in deleted_ids:
+        snap = locked_by_id[row_id]
+        counts_by_feature[snap["feature_key"]] = (
+            counts_by_feature.get(snap["feature_key"], 0) + 1
+        )
+        if len(entries) < _SWEEP_AUDIT_ENTRY_CAP:
+            entries.append(snap)
     truncated_count = max(0, deleted_count - _SWEEP_AUDIT_ENTRY_CAP)
 
-    if expiring_rows:
-        await db.execute(
-            delete(OrgFeatureOverride)
-            .where(OrgFeatureOverride.expires_at.is_not(None))
-            .where(OrgFeatureOverride.expires_at <= cutoff)
-        )
     await db.commit()
 
     await logger.ainfo(

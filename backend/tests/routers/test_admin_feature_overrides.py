@@ -640,3 +640,156 @@ async def test_sweep_requires_orgs_manage(session_factory):
         ).scalars().all()
     # All 4 rows still present.
     assert len(count) == 4
+
+
+@pytest.mark.asyncio
+async def test_sweep_audit_count_matches_actual_deletes(session_factory):
+    """Regression: audit `deleted_count`, `entries`, and `counts_by_feature`
+    must reflect rows that were ACTUALLY removed by this sweep, not the
+    set of rows the sweep merely observed as expired.
+
+    Pre-fix the route ran SELECT-then-DELETE-by-predicate. Two
+    overlapping sweeps could both snapshot the same expired rows; the
+    first deleted them, the second deleted 0 but still audited
+    ``deleted_count = len(snapshot)``. With lock-then-delete-by-id +
+    deleted_count derived from the DELETE rowcount, the second sweep
+    audits exactly what it removed.
+
+    We simulate the race deterministically by deleting some of the
+    expired rows out-of-band BETWEEN the route's snapshot and its
+    DELETE. SQLite ignores SELECT FOR UPDATE, so this hook reliably
+    fires; on MySQL the FOR UPDATE serializes the second sweep until
+    the first commits, achieving the same invariant.
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import delete as _delete
+    from sqlalchemy import select as _select
+
+    from app._time import utcnow_naive
+
+    seed = await _seed(session_factory)
+    await _seed_overrides(
+        session_factory, seed["target_id"], admin_user_id=seed["admin_user_id"]
+    )
+
+    # Hook to fire between the route's snapshot SELECT and its
+    # DELETE: delete ai.budget out-of-band so the sweep observes 2
+    # expired rows but only actually deletes 1.
+    saw_select = {"done": False}
+    real_execute = AsyncSession.execute
+
+    async def hooked_execute(self, statement, *args, **kwargs):
+        sql = str(statement).lower()
+        # Fire AFTER the snapshot SELECT, BEFORE the DELETE.
+        if (
+            not saw_select["done"]
+            and "select" in sql
+            and "org_feature_overrides" in sql
+            and "expires_at" in sql
+        ):
+            saw_select["done"] = True
+            result = await real_execute(self, statement, *args, **kwargs)
+            # Out-of-band delete via a separate session so it commits
+            # independently of the route's session.
+            async with session_factory() as side_db:
+                await side_db.execute(
+                    _delete(OrgFeatureOverride).where(
+                        OrgFeatureOverride.org_id == seed["target_id"],
+                        OrgFeatureOverride.feature_key == "ai.budget",
+                    )
+                )
+                await side_db.commit()
+            return result
+        return await real_execute(self, statement, *args, **kwargs)
+
+    app = make_app(session_factory, _superadmin_resolver())
+    with patch.object(AsyncSession, "execute", hooked_execute):
+        with TestClient(app) as client:
+            res = client.post("/api/v1/admin/orgs/feature-overrides/sweep-expired")
+    assert res.status_code == 200
+    # Only ai.forecast survived to be deleted by the route. ai.budget
+    # was deleted out-of-band; the route's DELETE-by-id should not
+    # count it.
+    assert res.json() == {"deleted_count": 1}
+
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                _select(AuditEvent).where(
+                    AuditEvent.event_type
+                    == "admin.feature_override.expired_swept"
+                )
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    detail = rows[0].detail
+    # Invariants the reviewer asked for: the audit row's numbers
+    # describe what was ACTUALLY deleted by this sweep, and entries
+    # match deleted_count.
+    assert detail["deleted_count"] == 1
+    assert len(detail["entries"]) == detail["deleted_count"]
+    assert sum(detail["counts_by_feature"].values()) == detail["deleted_count"]
+    assert detail["truncated_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sweep_zero_deletes_when_all_expired_rows_already_gone(session_factory):
+    """Edge: every expired row is removed out-of-band between the
+    route's snapshot and its DELETE. Sweep must audit deleted_count=0
+    with empty entries — the symmetric of the partial-overlap case.
+    """
+    from sqlalchemy import delete as _delete
+    from sqlalchemy import select as _select
+
+    seed = await _seed(session_factory)
+    await _seed_overrides(
+        session_factory, seed["target_id"], admin_user_id=seed["admin_user_id"]
+    )
+
+    saw_select = {"done": False}
+    real_execute = AsyncSession.execute
+
+    async def hooked_execute(self, statement, *args, **kwargs):
+        sql = str(statement).lower()
+        if (
+            not saw_select["done"]
+            and "select" in sql
+            and "org_feature_overrides" in sql
+            and "expires_at" in sql
+        ):
+            saw_select["done"] = True
+            result = await real_execute(self, statement, *args, **kwargs)
+            async with session_factory() as side_db:
+                await side_db.execute(
+                    _delete(OrgFeatureOverride).where(
+                        OrgFeatureOverride.org_id == seed["target_id"],
+                        OrgFeatureOverride.feature_key.in_(
+                            ["ai.budget", "ai.forecast"]
+                        ),
+                    )
+                )
+                await side_db.commit()
+            return result
+        return await real_execute(self, statement, *args, **kwargs)
+
+    app = make_app(session_factory, _superadmin_resolver())
+    with patch.object(AsyncSession, "execute", hooked_execute):
+        with TestClient(app) as client:
+            res = client.post("/api/v1/admin/orgs/feature-overrides/sweep-expired")
+    assert res.status_code == 200
+    assert res.json() == {"deleted_count": 0}
+
+    async with session_factory() as db:
+        row = (
+            await db.execute(
+                _select(AuditEvent).where(
+                    AuditEvent.event_type
+                    == "admin.feature_override.expired_swept"
+                )
+            )
+        ).scalars().one()
+    assert row.detail["deleted_count"] == 0
+    assert row.detail["entries"] == []
+    assert row.detail["counts_by_feature"] == {}
+    assert row.detail["truncated_count"] == 0
