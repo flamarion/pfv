@@ -214,6 +214,16 @@ async def update_role(
         for f in ("name", "description", "permissions")
         if getattr(body, f) is not None
     ]
+    # Capture the permission delta for the audit row. Keys are not
+    # sensitive (the catalog is exposed via /admin/permissions to any
+    # caller with roles.manage), so logging the actual sets gives an
+    # operator the accountability trail we want without leaking
+    # anything.
+    before_perms = sorted(existing["permissions"])
+    after_perms = sorted(item["permissions"])
+    perm_added = sorted(set(after_perms) - set(before_perms))
+    perm_removed = sorted(set(before_perms) - set(after_perms))
+
     await logger.ainfo(
         "admin.role.updated",
         actor_user_id=current_user.id,
@@ -221,6 +231,8 @@ async def update_role(
         role_id=item["id"],
         role_slug=item["slug"],
         changed_fields=changed_fields,
+        permissions_added=perm_added,
+        permissions_removed=perm_removed,
     )
     await audit_service.record_audit_event(
         session_factory,
@@ -237,6 +249,8 @@ async def update_role(
             "role_slug": item["slug"],
             "changed_fields": changed_fields,
             "permission_count": len(item["permissions"]),
+            "permissions_added": perm_added,
+            "permissions_removed": perm_removed,
         },
     )
     return RoleDetailResponse(**item)
