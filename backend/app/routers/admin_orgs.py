@@ -300,6 +300,14 @@ async def sweep_expired_feature_overrides(
     access" without reaching for structlog. ``entries`` is capped at
     ``_SWEEP_AUDIT_ENTRY_CAP``; over the cap, ``truncated_count`` and
     ``counts_by_feature`` carry the rest.
+
+    On the rare ``DELETE`` rowcount mismatch path (locked N rows under
+    SELECT FOR UPDATE, deleted M < N) the audit detail records
+    ``deleted_count`` and ``locked_count`` plus a ``divergence`` flag,
+    and OMITS per-row ``entries`` and ``counts_by_feature``: without
+    ``DELETE ... RETURNING`` (unsupported on MySQL) we cannot honestly
+    tell which of the locked rows our DELETE removed versus rows a
+    concurrent actor removed, so we refuse to guess.
     """
     cutoff = utcnow_naive()
     # Lock-then-delete-by-id so the audit summary describes rows this
@@ -339,7 +347,8 @@ async def sweep_expired_feature_overrides(
     }
     locked_ids = list(locked_by_id.keys())
 
-    deleted_ids: list[int] = []
+    deleted_count = 0
+    divergence = False
     if locked_ids:
         delete_result = await db.execute(
             delete(OrgFeatureOverride).where(OrgFeatureOverride.id.in_(locked_ids))
@@ -350,49 +359,64 @@ async def sweep_expired_feature_overrides(
             # ``rowcount`` of -1/None on a dialect that doesn't report
             # affected rows is treated as the all-locked-deleted case;
             # FOR UPDATE held the rows in InnoDB so this is safe.
-            deleted_ids = locked_ids
+            deleted_count = len(locked_ids)
         else:
-            # Divergence: between SELECT FOR UPDATE and DELETE, some
-            # rows disappeared (out-of-band delete, concurrent sweep
-            # without locking, or a non-InnoDB dialect). Trust the
-            # rowcount and report only the rows that actually went
-            # away under our DELETE.
+            # Divergence: rowcount disagrees with the locked snapshot.
+            # On MySQL InnoDB with SELECT FOR UPDATE this branch
+            # should never fire in practice; it's a defensive
+            # fallback for environments without row locks (e.g., the
+            # SQLite test database) and protects audit detail from
+            # claiming false row identities.
+            #
+            # We refuse to guess which of the locked rows our DELETE
+            # actually removed: without ``DELETE ... RETURNING``
+            # (which MySQL does not support) the answer is
+            # unknowable. ``deleted_count`` (the rowcount) is
+            # authoritative; ``entries`` and ``counts_by_feature``
+            # are deliberately omitted from the audit detail.
+            divergence = True
+            deleted_count = affected
             await logger.awarning(
                 "admin.feature_override.sweep.lock_delete_mismatch",
                 locked_count=len(locked_ids),
                 deleted_count=affected,
             )
-            still_present = set(
-                (
-                    await db.execute(
-                        select(OrgFeatureOverride.id).where(
-                            OrgFeatureOverride.id.in_(locked_ids)
-                        )
-                    )
-                ).scalars().all()
+
+    # Audit detail. Happy path: bounded per-row entries +
+    # counts_by_feature for ops spot-checks. Divergence path:
+    # counts only, with an explicit flag and note so a future reader
+    # of the audit table can tell why per-row identity is missing.
+    detail: dict[str, object]
+    if divergence:
+        detail = {
+            "deleted_count": deleted_count,
+            "locked_count": len(locked_ids),
+            "divergence": True,
+            "divergence_reason": "concurrent_modification",
+            "note": (
+                "Exact row identities could not be determined under "
+                "concurrent sweep activity. deleted_count is "
+                "authoritative; counts_by_feature and entries are "
+                "omitted."
+            ),
+        }
+    else:
+        counts_by_feature: dict[str, int] = {}
+        entries: list[dict] = []
+        for row_id in locked_ids:
+            snap = locked_by_id[row_id]
+            counts_by_feature[snap["feature_key"]] = (
+                counts_by_feature.get(snap["feature_key"], 0) + 1
             )
-            absent_ids = [i for i in locked_ids if i not in still_present]
-            # Cap absent_ids by the affected count so we don't audit
-            # rows another actor removed. When absent > affected,
-            # someone else won those deletes; pick the first ``affected``
-            # in the locked order to keep audit ordering stable.
-            deleted_ids = absent_ids[:affected]
-
-    deleted_count = len(deleted_ids)
-
-    # Build the bounded audit detail from rows the sweep ACTUALLY
-    # removed. counts_by_feature is the truth-as-aggregate; entries is
-    # a capped sample for spot-checks.
-    counts_by_feature: dict[str, int] = {}
-    entries: list[dict] = []
-    for row_id in deleted_ids:
-        snap = locked_by_id[row_id]
-        counts_by_feature[snap["feature_key"]] = (
-            counts_by_feature.get(snap["feature_key"], 0) + 1
-        )
-        if len(entries) < _SWEEP_AUDIT_ENTRY_CAP:
-            entries.append(snap)
-    truncated_count = max(0, deleted_count - _SWEEP_AUDIT_ENTRY_CAP)
+            if len(entries) < _SWEEP_AUDIT_ENTRY_CAP:
+                entries.append(snap)
+        truncated_count = max(0, deleted_count - _SWEEP_AUDIT_ENTRY_CAP)
+        detail = {
+            "deleted_count": deleted_count,
+            "entries": entries,
+            "truncated_count": truncated_count,
+            "counts_by_feature": counts_by_feature,
+        }
 
     await db.commit()
 
@@ -412,12 +436,7 @@ async def sweep_expired_feature_overrides(
         request_id=_request_id(),
         ip_address=get_client_ip(request),
         outcome="success",
-        detail={
-            "deleted_count": deleted_count,
-            "entries": entries,
-            "truncated_count": truncated_count,
-            "counts_by_feature": counts_by_feature,
-        },
+        detail=detail,
     )
     return {"deleted_count": deleted_count}
 

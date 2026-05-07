@@ -517,6 +517,10 @@ async def test_sweep_writes_audit_event(session_factory):
         "ai.budget": 1,
         "ai.forecast": 1,
     }
+    # Happy path: no divergence flag (or explicitly false). Pin the
+    # contract so a future reader can tell happy-path detail from the
+    # divergence-path detail at a glance.
+    assert not row.detail.get("divergence")
 
 
 @pytest.mark.asyncio
@@ -541,11 +545,13 @@ async def test_sweep_idempotent_when_nothing_expired(session_factory):
             )
         ).scalars().all()
     assert len(rows) == 1
-    # No expirees: zero counts everywhere, empty entries list.
+    # No expirees: zero counts everywhere, empty entries list. Happy
+    # path (nothing was locked, nothing was deleted), so no divergence.
     assert rows[0].detail["deleted_count"] == 0
     assert rows[0].detail["truncated_count"] == 0
     assert rows[0].detail["entries"] == []
     assert rows[0].detail["counts_by_feature"] == {}
+    assert not rows[0].detail.get("divergence")
 
 
 @pytest.mark.asyncio
@@ -614,6 +620,8 @@ async def test_sweep_truncates_audit_entries_over_cap(session_factory):
     # Aggregate counts cover ALL deleted rows, not just the entries list.
     total_via_counts = sum(row.detail["counts_by_feature"].values())
     assert total_via_counts == over_cap
+    # Happy path: no divergence under non-racing sweep.
+    assert not row.detail.get("divergence")
 
 
 @pytest.mark.asyncio
@@ -724,13 +732,20 @@ async def test_sweep_audit_count_matches_actual_deletes(session_factory):
         ).scalars().all()
     assert len(rows) == 1
     detail = rows[0].detail
-    # Invariants the reviewer asked for: the audit row's numbers
-    # describe what was ACTUALLY deleted by this sweep, and entries
-    # match deleted_count.
+    # Divergence path: the route locked 2 rows under SELECT FOR
+    # UPDATE (no-op on SQLite) but only deleted 1 because the other
+    # was removed out-of-band. We CANNOT honestly tell which of the
+    # two locked rows our DELETE removed without DELETE ... RETURNING
+    # (MySQL doesn't have it). The audit row records the count we
+    # know is true and explicitly flags the gap; per-row identities
+    # are omitted because asserting them would be a guess.
     assert detail["deleted_count"] == 1
-    assert len(detail["entries"]) == detail["deleted_count"]
-    assert sum(detail["counts_by_feature"].values()) == detail["deleted_count"]
-    assert detail["truncated_count"] == 0
+    assert detail["locked_count"] == 2
+    assert detail["divergence"] is True
+    assert detail["divergence_reason"] == "concurrent_modification"
+    assert "entries" not in detail
+    assert "counts_by_feature" not in detail
+    assert "truncated_count" not in detail
 
 
 @pytest.mark.asyncio
@@ -789,7 +804,13 @@ async def test_sweep_zero_deletes_when_all_expired_rows_already_gone(session_fac
                 )
             )
         ).scalars().one()
+    # Divergence: route locked 2 rows, then both were deleted
+    # out-of-band, so DELETE-by-id removed 0. Same shape as the
+    # partial-overlap case. No per-row claims.
     assert row.detail["deleted_count"] == 0
-    assert row.detail["entries"] == []
-    assert row.detail["counts_by_feature"] == {}
-    assert row.detail["truncated_count"] == 0
+    assert row.detail["locked_count"] == 2
+    assert row.detail["divergence"] is True
+    assert row.detail["divergence_reason"] == "concurrent_modification"
+    assert "entries" not in row.detail
+    assert "counts_by_feature" not in row.detail
+    assert "truncated_count" not in row.detail
