@@ -467,13 +467,13 @@ All API routes are prefixed with `/api/v1/`. The API is organized by resource:
 | Import | `/api/v1/import` | CSV file import (preview + confirm) |
 | Settings | `/api/v1/settings` | Org settings, billing periods, billing cycle |
 | Orgs | `/api/v1/orgs` | Org rename (owner-only) and per-org actions |
-| Org members | `/api/v1/orgs/.../members` | Membership and invitations |
-| Org data | `/api/v1/org-data` | Org-data wipe / reset (audited, lock-guarded) |
+| Org members | `/api/v1/orgs/members`, `/api/v1/orgs/invitations` | Membership and invitations |
+| Org data | `/api/v1/orgs/data` | Org-data wipe / reset (audited, lock-guarded) |
 | Plans | `/api/v1/plans` | Plan catalog |
 | Subscriptions | `/api/v1/subscriptions` | Trial / subscription state |
 | Admin | `/api/v1/admin` | Superadmin dashboard |
 | Admin orgs | `/api/v1/admin/orgs` | Superadmin org management + override sweep |
-| Admin audit | `/api/v1/admin/audit-events` | Audit log (durable trail) |
+| Admin audit | `/api/v1/admin/audit` | Audit log (durable trail) |
 | Admin roles | `/api/v1/admin/roles` | Custom role + permission editing |
 
 ---

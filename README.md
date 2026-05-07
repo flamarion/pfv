@@ -24,7 +24,7 @@ Track income and expenses across multiple accounts, set budgets per category, fo
 | Layer | Technology |
 |-------|-----------|
 | Backend | Python 3.12, FastAPI, SQLAlchemy 2.0 (async), Alembic, Pydantic v2 |
-| Frontend | Next.js 15 (App Router), React 19, TypeScript, Tailwind CSS, Recharts |
+| Frontend | Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS, Recharts |
 | Database | MySQL 8.0 (self-hosted on a single DO droplet in production) |
 | Cache | Redis 7 (containerized in dev, self-hosted on the same droplet in production) |
 | Auth | JWT (access + refresh), bcrypt, TOTP (pyotp), Google OAuth2 (with step-up for sensitive flows) |
