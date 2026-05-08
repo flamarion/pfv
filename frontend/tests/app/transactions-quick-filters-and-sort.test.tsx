@@ -448,4 +448,18 @@ describe("TransactionsPage — sort direction across columns (Option B)", () => 
       expect(getDesktopHeader("Status").textContent).toMatch(/Status.*↑/);
     });
   });
+
+  it("Mobile tap targets: every sortable header carries min-h-[32px] sm:min-h-0 (WCAG 2.5.8)", async () => {
+    const mock = setupApiFetch();
+    render(<TransactionsPage />);
+
+    await awaitHeadersReady(mock);
+
+    const required = ["Date", "Description", "Account", "Category", "Status", "Amount"];
+    for (const name of required) {
+      const btn = getDesktopHeader(name);
+      expect(btn.className).toContain("min-h-[32px]");
+      expect(btn.className).toContain("sm:min-h-0");
+    }
+  });
 });
