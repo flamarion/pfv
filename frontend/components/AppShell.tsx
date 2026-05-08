@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useAuth } from "@/components/auth/AuthProvider";
 import ThemeToggle from "@/components/ui/ThemeToggle";
 import TrialBanner from "@/components/ui/TrialBanner";
-import { isSuperadmin as checkSuperadmin } from "@/lib/auth";
+import { hasPlatformPermission } from "@/lib/auth";
 
 const navItems = [
   {
@@ -142,7 +142,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     );
   }
 
-  const superadmin = checkSuperadmin(user);
+  const canSeeSystemNav = hasPlatformPermission(user, "admin.view");
 
   // All hrefs that could potentially match the current pathname.
   // Used to break ties: when both `/admin` and `/admin/orgs` would
@@ -198,7 +198,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             </Link>
           ))}
 
-          {superadmin && (
+          {canSeeSystemNav && (
             <>
               <div className="pb-1 pt-6 px-3">
                 <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-sidebar-muted">
