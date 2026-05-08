@@ -119,6 +119,11 @@ export default function DashboardPage() {
   // math including pending transfer legs.
   const [accountMonthEndForecast, setAccountMonthEndForecast] =
     useState<AccountMonthEndForecastResponse | null>(null);
+  // Distinguish "in flight / not yet fetched" from "load failed" so the
+  // card can render an error state instead of a loading placeholder
+  // forever on a 500.
+  const [accountMonthEndForecastError, setAccountMonthEndForecastError] =
+    useState(false);
   const accountForecastRequestId = useRef(0);
   // Monotonically-increasing request id for the projection fetch. Used
   // to discard stale responses when a newer fetch has already started
@@ -328,18 +333,22 @@ export default function DashboardPage() {
     if (!realPeriodStart || !isCurrentSelectedPeriod) {
       accountForecastRequestId.current += 1;
       setAccountMonthEndForecast(null);
+      setAccountMonthEndForecastError(false);
       return;
     }
     const myId = ++accountForecastRequestId.current;
+    setAccountMonthEndForecastError(false);
     try {
       const data = await apiFetch<AccountMonthEndForecastResponse>(
         `/api/v1/forecast/account-balances?period_start=${realPeriodStart}`,
       );
       if (accountForecastRequestId.current !== myId) return;
       setAccountMonthEndForecast(data);
+      setAccountMonthEndForecastError(false);
     } catch {
       if (accountForecastRequestId.current !== myId) return;
       setAccountMonthEndForecast(null);
+      setAccountMonthEndForecastError(true);
     }
   }, [realPeriodStart, isCurrentSelectedPeriod]);
 
@@ -743,6 +752,7 @@ export default function DashboardPage() {
             forecast={accountMonthEndForecast}
             isCurrentPeriod={isCurrentSelectedPeriod}
             hasAnyAccounts={activeAccounts.length > 0}
+            hasError={accountMonthEndForecastError}
             onJumpToCurrent={() => {
               const idx = periods.findIndex((p) => p.end_date === null);
               if (idx >= 0) {

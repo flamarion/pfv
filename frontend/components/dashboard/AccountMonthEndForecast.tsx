@@ -33,6 +33,11 @@ export interface AccountMonthEndForecastProps {
   isCurrentPeriod: boolean;
   onJumpToCurrent?: () => void;
   hasAnyAccounts: boolean;
+  // True when the most recent fetch attempt failed. Distinguishes "still
+  // loading" (forecast null AND no error) from "load failed" (forecast
+  // null AND error true). Without this, a 500 from the endpoint would
+  // render the same "Loading…" placeholder forever.
+  hasError?: boolean;
 }
 
 export default function AccountMonthEndForecast({
@@ -40,7 +45,14 @@ export default function AccountMonthEndForecast({
   isCurrentPeriod,
   onJumpToCurrent,
   hasAnyAccounts,
+  hasError = false,
 }: AccountMonthEndForecastProps) {
+  // No accounts: page-level empty state owns this surface; render nothing
+  // regardless of period. Runs BEFORE the period check so an empty org
+  // viewing a past/future period doesn't see a neutral month-end card it
+  // can never use.
+  if (!hasAnyAccounts) return null;
+
   // Past or future selected period: the stored balance is "now", not
   // historical or future, so projecting it into another period would
   // mislead. Spec mandates a small neutral state instead.
@@ -68,9 +80,18 @@ export default function AccountMonthEndForecast({
     );
   }
 
-  // No accounts yet: defer to the page-level empty state. Render nothing
-  // so the dashboard's existing "No accounts yet" tile owns this surface.
-  if (!hasAnyAccounts) return null;
+  if (hasError) {
+    return (
+      <section className={`${card} p-5`} data-testid="account-month-end-forecast">
+        <header className={`mb-2 flex items-center justify-between ${cardHeader}`}>
+          <h2 className={cardTitle}>Forecast</h2>
+        </header>
+        <p className="text-sm text-text-muted">
+          Couldn&apos;t load account forecast. Try again later.
+        </p>
+      </section>
+    );
+  }
 
   if (!forecast) {
     return (

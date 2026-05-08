@@ -201,11 +201,53 @@ describe("AccountMonthEndForecast — empty states", () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it("renders nothing when there are no accounts even on a non-current period", () => {
+    // Empty org viewing a past/future period must NOT see the neutral
+    // month-end card — the page-level empty state owns this surface.
+    const { container } = render(
+      <AccountMonthEndForecast
+        {...defaults({
+          forecast: null,
+          hasAnyAccounts: false,
+          isCurrentPeriod: false,
+        })}
+      />,
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
   it("does not show a zero-pending subtext on rows whose pending delta is exactly 0", () => {
     render(
       <AccountMonthEndForecast {...defaults({ forecast: TWO_CURRENCIES })} />,
     );
     expect(screen.queryByText(/Includes \+?€0\.00 pending/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Includes \+?\$0\.00 pending/)).not.toBeInTheDocument();
+  });
+});
+
+describe("AccountMonthEndForecast — error state", () => {
+  it("renders an explicit error message when hasError is true (not 'Loading…')", () => {
+    render(
+      <AccountMonthEndForecast
+        {...defaults({ forecast: null, hasError: true })}
+      />,
+    );
+    expect(
+      screen.getByText(/Couldn't load account forecast\. Try again later\./),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Loading…/)).not.toBeInTheDocument();
+  });
+
+  it("error state still renders nothing when there are no accounts", () => {
+    const { container } = render(
+      <AccountMonthEndForecast
+        {...defaults({
+          forecast: null,
+          hasAnyAccounts: false,
+          hasError: true,
+        })}
+      />,
+    );
+    expect(container.firstChild).toBeNull();
   });
 });
