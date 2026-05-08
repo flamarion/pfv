@@ -12,6 +12,51 @@ import { input, label, btnPrimary, card, cardHeader, cardTitle, error as errorCl
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
 import type { BillingPeriod, Budget, Category } from "@/lib/types";
 import ConfirmModal from "@/components/ui/ConfirmModal";
+import { chartColor } from "@/lib/chart-colors";
+
+// D5: shape that rounds the spent bar's right edge when the stack has
+// no trailing remaining / over segment (i.e. exactly 100% utilization).
+// Recharts radius={[4,0,0,4]} on the Bar leaves the right corners
+// squared, which becomes visually obvious at high fill ratios where the
+// remaining segment is gone. We compute the per-bar payload here and
+// switch the right-side radius based on actual utilization.
+interface BudgetBarShapeProps {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  fill?: string;
+  payload?: { spent: number; remaining: number; over: number };
+}
+
+function BudgetSpentBarShape(props: BudgetBarShapeProps) {
+  const { x = 0, y = 0, width = 0, height = 0, fill, payload } = props;
+  if (width <= 0 || height <= 0) return null;
+  // No remaining headroom AND no over-budget bar to the right → spent
+  // bar IS the full row, so round all four corners. Same render as a
+  // standalone bar.
+  const remaining = payload?.remaining ?? 0;
+  const over = payload?.over ?? 0;
+  const isFullRow = remaining <= 0 && over <= 0;
+  const r = Math.min(4, height / 2, width / 2);
+  const rightR = isFullRow ? r : 0;
+  // Clockwise rounded rect with per-side radius. Always rounds the
+  // left corners (this bar always starts at the row origin); the
+  // right corners pick up rounding only when no follow-on bar exists.
+  const path = [
+    `M ${x + r} ${y}`,
+    rightR > 0
+      ? `H ${x + width - rightR} Q ${x + width} ${y} ${x + width} ${y + rightR}`
+      : `H ${x + width}`,
+    rightR > 0
+      ? `V ${y + height - rightR} Q ${x + width} ${y + height} ${x + width - rightR} ${y + height}`
+      : `V ${y + height}`,
+    `H ${x + r} Q ${x} ${y + height} ${x} ${y + height - r}`,
+    `V ${y + r} Q ${x} ${y} ${x + r} ${y}`,
+    "Z",
+  ].join(" ");
+  return <path d={path} fill={fill} style={{ cursor: "pointer" }} />;
+}
 
 export default function BudgetsPage() {
   const { user, loading } = useAuth();
@@ -279,37 +324,49 @@ export default function BudgetsPage() {
                     over: Math.max(Number(b.spent) - Number(b.amount), 0),
                   }))} layout="vertical" margin={{ left: 0, right: 0, top: 0, bottom: 0 }}>
                     <XAxis type="number" hide />
-                    <YAxis type="category" dataKey="name" width={100} tick={{ fill: "#9ba8bd", fontSize: 11 }} />
+                    <YAxis type="category" dataKey="name" width={100} tick={{ fill: chartColor.axisTick, fontSize: 11 }} />
                     <Tooltip
                       formatter={(v, name) => [
                         formatAmount(Number(v)),
-                        name === "spent" ? <span style={{ color: "#f87171" }}>Spent</span>
-                          : name === "over" ? <span style={{ color: "#f87171" }}>Over budget</span>
-                          : <span style={{ color: "#4ade80" }}>Remaining</span>,
+                        name === "spent" ? <span style={{ color: chartColor.spent }}>Spent</span>
+                          : name === "over" ? <span style={{ color: chartColor.over }}>Over budget</span>
+                          : <span style={{ color: chartColor.remaining }}>Remaining</span>,
                       ]}
                       contentStyle={{ fontSize: "11px" }}
                     />
-                    <Bar dataKey="spent" stackId="a" radius={[4, 0, 0, 4]} animationDuration={600}
+                    {/* D5 fix: shape function recomputes corner radii
+                        per-row so a stack at >=100% utilization (no
+                        remaining segment, no over segment) still rounds
+                        its right edge. Static radius={[4,0,0,4]} on the
+                        Bar wouldn't, because the trailing remaining bar
+                        would normally own the right rounding. */}
+                    <Bar dataKey="spent" stackId="a" animationDuration={600}
                       cursor="pointer"
+                      shape={(props: BudgetBarShapeProps) => (
+                        <BudgetSpentBarShape {...props} />
+                      )}
                       onClick={(data) => {
                         const name = data?.name || data?.payload?.name;
                         if (name) router.push(`/transactions?category=${encodeURIComponent(name)}`);
                       }}
                     >
                       {budgets.map((b, i) => (
-                        <Cell key={i} fill={b.percent_used > 100 ? "#f87171" : b.percent_used > 80 ? "#f59e0b" : "#D4A64A"} />
+                        <Cell
+                          key={i}
+                          fill={b.percent_used > 100 ? chartColor.over : b.percent_used > 80 ? chartColor.watch : chartColor.spent}
+                        />
                       ))}
                     </Bar>
-                    <Bar dataKey="remaining" stackId="a" fill="#e8ebf0" radius={[0, 4, 4, 0]} animationDuration={600} />
-                    <Bar dataKey="over" stackId="a" fill="#f87171" radius={[0, 4, 4, 0]} animationDuration={600} />
+                    <Bar dataKey="remaining" stackId="a" fill={chartColor.remaining} radius={[0, 4, 4, 0]} animationDuration={600} />
+                    <Bar dataKey="over" stackId="a" fill={chartColor.over} radius={[4, 4, 4, 4]} animationDuration={600} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
               <div className="mt-3 flex gap-4 px-4 pb-2 text-[10px] text-text-muted">
-                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#D4A64A" }} /> Spent</span>
-                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#f59e0b" }} /> &gt;80%</span>
-                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#f87171" }} /> Over budget</span>
-                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#e8ebf0" }} /> Remaining</span>
+                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: chartColor.spent }} /> Spent</span>
+                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: chartColor.watch }} /> &gt;80%</span>
+                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: chartColor.over }} /> Over budget</span>
+                <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: chartColor.remaining }} /> Remaining</span>
               </div>
             </div>
           )}
