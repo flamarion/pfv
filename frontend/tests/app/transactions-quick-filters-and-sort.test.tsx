@@ -335,31 +335,37 @@ describe("TransactionsPage — sort direction across columns (Option B)", () => 
     return buttons[0];
   }
 
-  async function awaitHeadersReady() {
+  async function awaitHeadersReady(
+    mock: ReturnType<typeof vi.mocked<typeof apiFetch>>,
+  ) {
     // The page kicks off two fetches in parallel: loadRefs() (sets accounts,
     // categories, billing periods) and loadTransactions() (the row data).
     // When loadRefs finishes, periods updates which re-creates the
     // loadTransactions callback, which re-runs the load effect and flips
     // `fetching` back to true briefly. Headers disappear during that window.
     //
-    // To avoid racing the test against that flicker, wait for ALL six column
-    // header buttons to be present at the same time AND stay present for
-    // two consecutive polls.
+    // A "two consecutive polls" stability check isn't enough — under CI's
+    // slower scheduler the flicker can land between awaitHeadersReady
+    // returning and the next getDesktopHeader call. Instead, gate on a
+    // deterministic signal: the page has issued a SECOND /transactions
+    // request (the post-periods refetch) AND headers are currently visible.
+    // After the second transactions response resolves, fetching settles
+    // permanently because nothing else updates loadTransactions' deps.
     const required = ["Date", "Description", "Account", "Category", "Status", "Amount"];
-    let stable = 0;
     await waitFor(
       () => {
+        const txCalls = mock.mock.calls.filter(
+          (c) => typeof c[0] === "string" && (c[0] as string).startsWith("/api/v1/transactions"),
+        ).length;
+        if (txCalls < 2) {
+          throw new Error(`waiting for post-periods refetch (saw ${txCalls})`);
+        }
         const labels = screen.queryAllByRole("button").map((b) => b.textContent ?? "");
         const allPresent = required.every((name) =>
           labels.some((t) => t.startsWith(name)),
         );
         if (!allPresent) {
-          stable = 0;
           throw new Error("not all headers rendered yet");
-        }
-        stable++;
-        if (stable < 2) {
-          throw new Error("headers present but not yet stable");
         }
       },
       { timeout: 5000, interval: 25 },
@@ -367,18 +373,18 @@ describe("TransactionsPage — sort direction across columns (Option B)", () => 
   }
 
   it("Default state: Date column shows desc indicator", async () => {
-    setupApiFetch();
+    const mock = setupApiFetch();
     render(<TransactionsPage />);
 
-    await awaitHeadersReady();
+    await awaitHeadersReady(mock);
     expect(getDesktopHeader("Date").textContent).toMatch(/Date.*↓/);
   });
 
   it("Switching from Date (desc) to Description applies the column's natural default (asc)", async () => {
-    setupApiFetch();
+    const mock = setupApiFetch();
     render(<TransactionsPage />);
 
-    await awaitHeadersReady();
+    await awaitHeadersReady(mock);
 
     fireEvent.click(getDesktopHeader("Description"));
 
@@ -388,10 +394,10 @@ describe("TransactionsPage — sort direction across columns (Option B)", () => 
   });
 
   it("Switching from Description (asc) to Amount applies Amount's natural default (desc), not asc", async () => {
-    setupApiFetch();
+    const mock = setupApiFetch();
     render(<TransactionsPage />);
 
-    await awaitHeadersReady();
+    await awaitHeadersReady(mock);
 
     // First click description so we're on an asc column.
     fireEvent.click(getDesktopHeader("Description"));
@@ -408,10 +414,10 @@ describe("TransactionsPage — sort direction across columns (Option B)", () => 
   });
 
   it("Same-column click toggles direction (Date desc -> Date asc -> Date desc)", async () => {
-    setupApiFetch();
+    const mock = setupApiFetch();
     render(<TransactionsPage />);
 
-    await awaitHeadersReady();
+    await awaitHeadersReady(mock);
     expect(getDesktopHeader("Date").textContent).toMatch(/Date.*↓/);
 
     fireEvent.click(getDesktopHeader("Date"));
@@ -426,10 +432,10 @@ describe("TransactionsPage — sort direction across columns (Option B)", () => 
   });
 
   it("Switching from Amount (desc) to Status applies Status's natural default (asc)", async () => {
-    setupApiFetch();
+    const mock = setupApiFetch();
     render(<TransactionsPage />);
 
-    await awaitHeadersReady();
+    await awaitHeadersReady(mock);
 
     // Land on Amount via its natural default first.
     fireEvent.click(getDesktopHeader("Amount"));
