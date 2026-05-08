@@ -111,5 +111,81 @@ describe("AppShell — system nav gating", () => {
 
     expect(screen.getByText(/^System$/)).toBeInTheDocument();
     expect(screen.getByText("Admin")).toBeInTheDocument();
+    // admin.view alone does NOT grant the more specific destinations.
+    expect(screen.queryByText("Organizations")).toBeNull();
+    expect(screen.queryByText("Audit log")).toBeNull();
+    expect(screen.queryByText("Plans")).toBeNull();
+  });
+
+  it("shows only the Audit log link for a non-superadmin with audit.view alone", () => {
+    useAuthMock.mockReturnValue({
+      user: { ...BASE_USER, permissions: ["audit.view"] } as never,
+      loading: false,
+      needsSetup: false,
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: vi.fn(),
+      refreshMe: vi.fn(),
+    });
+
+    render(
+      <AppShell>
+        <p>page body</p>
+      </AppShell>,
+    );
+
+    expect(screen.getByText(/^System$/)).toBeInTheDocument();
+    expect(screen.getByText("Audit log")).toBeInTheDocument();
+    expect(screen.queryByText("Admin")).toBeNull();
+    expect(screen.queryByText("Organizations")).toBeNull();
+    expect(screen.queryByText("Plans")).toBeNull();
+  });
+
+  it("shows only the Organizations link for a non-superadmin with orgs.view alone", () => {
+    useAuthMock.mockReturnValue({
+      user: { ...BASE_USER, permissions: ["orgs.view"] } as never,
+      loading: false,
+      needsSetup: false,
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: vi.fn(),
+      refreshMe: vi.fn(),
+    });
+
+    render(
+      <AppShell>
+        <p>page body</p>
+      </AppShell>,
+    );
+
+    expect(screen.getByText(/^System$/)).toBeInTheDocument();
+    expect(screen.getByText("Organizations")).toBeInTheDocument();
+    expect(screen.queryByText("Admin")).toBeNull();
+    expect(screen.queryByText("Audit log")).toBeNull();
+    expect(screen.queryByText("Plans")).toBeNull();
+  });
+
+  it("shows only the Plans link for a non-superadmin with plans.manage alone", () => {
+    useAuthMock.mockReturnValue({
+      user: { ...BASE_USER, permissions: ["plans.manage"] } as never,
+      loading: false,
+      needsSetup: false,
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: vi.fn(),
+      refreshMe: vi.fn(),
+    });
+
+    render(
+      <AppShell>
+        <p>page body</p>
+      </AppShell>,
+    );
+
+    expect(screen.getByText(/^System$/)).toBeInTheDocument();
+    expect(screen.getByText("Plans")).toBeInTheDocument();
+    expect(screen.queryByText("Admin")).toBeNull();
+    expect(screen.queryByText("Organizations")).toBeNull();
+    expect(screen.queryByText("Audit log")).toBeNull();
   });
 });
