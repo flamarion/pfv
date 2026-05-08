@@ -26,6 +26,40 @@ type DashboardPayload = {
 
 const nf = new Intl.NumberFormat();
 
+type AdminCard = {
+  href: string;
+  title: string;
+  description: string;
+  permission: string;
+};
+
+// Catalog of /admin/* sub-pages reachable from the hub. Each card
+// declares the platform permission its destination requires, so users
+// only see cards whose target page they can open. Today /me does not
+// return permissions, so non-superadmins resolve to false on every
+// key — the hub renders empty for them, matching PR #171's gate.
+const ADMIN_CARDS: readonly AdminCard[] = [
+  {
+    href: "/admin/orgs",
+    title: "Organizations",
+    description: "Search, drill into, and manage every org on the platform.",
+    permission: "orgs.view",
+  },
+  {
+    href: "/admin/audit",
+    title: "Audit log",
+    description:
+      "Persisted record of platform actions (subscription overrides, org deletes, tenant resets).",
+    permission: "audit.view",
+  },
+  {
+    href: "/admin/roles",
+    title: "Roles",
+    description: "Manage platform roles and the permissions they grant.",
+    permission: "roles.manage",
+  },
+];
+
 function KpiCard({ label, value }: { label: string; value: number }) {
   return (
     <div className={`${card} p-5`}>
@@ -100,6 +134,13 @@ export default function AdminDashboardPage() {
   // shell before the effect above redirects them to /dashboard.
   if (authLoading || !canViewAdmin) return null;
 
+  // Hide cards whose destination the current user lacks permission to
+  // open. Mirrors AppShell's per-link gating so a user never sees a
+  // card they'd be redirected from.
+  const visibleAdminCards = ADMIN_CARDS.filter((c) =>
+    hasPlatformPermission(user, c.permission),
+  );
+
   return (
     <AppShell>
       <div className="space-y-6">
@@ -131,36 +172,20 @@ export default function AdminDashboardPage() {
               <HealthRow name="Redis" cell={data.health.redis} />
             </section>
 
-            <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Link
-                href="/admin/orgs"
-                className={`${card} block p-5 transition-colors hover:border-accent`}
-              >
-                <h2 className={`${cardTitle} mb-1`}>Organizations</h2>
-                <p className="text-sm text-text-secondary">
-                  Search, drill into, and manage every org on the platform.
-                </p>
-              </Link>
-              <Link
-                href="/admin/audit"
-                className={`${card} block p-5 transition-colors hover:border-accent`}
-              >
-                <h2 className={`${cardTitle} mb-1`}>Audit log</h2>
-                <p className="text-sm text-text-secondary">
-                  Persisted record of platform actions (subscription overrides,
-                  org deletes, tenant resets).
-                </p>
-              </Link>
-              <Link
-                href="/admin/roles"
-                className={`${card} block p-5 transition-colors hover:border-accent`}
-              >
-                <h2 className={`${cardTitle} mb-1`}>Roles</h2>
-                <p className="text-sm text-text-secondary">
-                  Manage platform roles and the permissions they grant.
-                </p>
-              </Link>
-            </section>
+            {visibleAdminCards.length > 0 && (
+              <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {visibleAdminCards.map((c) => (
+                  <Link
+                    key={c.href}
+                    href={c.href}
+                    className={`${card} block p-5 transition-colors hover:border-accent`}
+                  >
+                    <h2 className={`${cardTitle} mb-1`}>{c.title}</h2>
+                    <p className="text-sm text-text-secondary">{c.description}</p>
+                  </Link>
+                ))}
+              </section>
+            )}
           </>
         )}
       </div>
