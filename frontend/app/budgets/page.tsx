@@ -13,50 +13,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 
 import type { BillingPeriod, Budget, Category } from "@/lib/types";
 import ConfirmModal from "@/components/ui/ConfirmModal";
 import { chartColor } from "@/lib/chart-colors";
-
-// D5: shape that rounds the spent bar's right edge when the stack has
-// no trailing remaining / over segment (i.e. exactly 100% utilization).
-// Recharts radius={[4,0,0,4]} on the Bar leaves the right corners
-// squared, which becomes visually obvious at high fill ratios where the
-// remaining segment is gone. We compute the per-bar payload here and
-// switch the right-side radius based on actual utilization.
-interface BudgetBarShapeProps {
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  fill?: string;
-  payload?: { spent: number; remaining: number; over: number };
-}
-
-function BudgetSpentBarShape(props: BudgetBarShapeProps) {
-  const { x = 0, y = 0, width = 0, height = 0, fill, payload } = props;
-  if (width <= 0 || height <= 0) return null;
-  // No remaining headroom AND no over-budget bar to the right → spent
-  // bar IS the full row, so round all four corners. Same render as a
-  // standalone bar.
-  const remaining = payload?.remaining ?? 0;
-  const over = payload?.over ?? 0;
-  const isFullRow = remaining <= 0 && over <= 0;
-  const r = Math.min(4, height / 2, width / 2);
-  const rightR = isFullRow ? r : 0;
-  // Clockwise rounded rect with per-side radius. Always rounds the
-  // left corners (this bar always starts at the row origin); the
-  // right corners pick up rounding only when no follow-on bar exists.
-  const path = [
-    `M ${x + r} ${y}`,
-    rightR > 0
-      ? `H ${x + width - rightR} Q ${x + width} ${y} ${x + width} ${y + rightR}`
-      : `H ${x + width}`,
-    rightR > 0
-      ? `V ${y + height - rightR} Q ${x + width} ${y + height} ${x + width - rightR} ${y + height}`
-      : `V ${y + height}`,
-    `H ${x + r} Q ${x} ${y + height} ${x} ${y + height - r}`,
-    `V ${y + r} Q ${x} ${y} ${x + r} ${y}`,
-    "Z",
-  ].join(" ");
-  return <path d={path} fill={fill} style={{ cursor: "pointer" }} />;
-}
+import { BudgetSpentBarShape, type BudgetSpentBarShapeProps } from "@/lib/chart-shapes";
 
 export default function BudgetsPage() {
   const { user, loading } = useAuth();
@@ -334,15 +291,16 @@ export default function BudgetsPage() {
                       ]}
                       contentStyle={{ fontSize: "11px" }}
                     />
-                    {/* D5 fix: shape function recomputes corner radii
-                        per-row so a stack at >=100% utilization (no
-                        remaining segment, no over segment) still rounds
-                        its right edge. Static radius={[4,0,0,4]} on the
-                        Bar wouldn't, because the trailing remaining bar
-                        would normally own the right rounding. */}
+                    {/* D5 fix: shared BudgetSpentBarShape recomputes
+                        corner radii per-row so a stack at >=100%
+                        utilization (no remaining segment, no over
+                        segment) still rounds its right edge. Static
+                        radius={[4,0,0,4]} on the Bar wouldn't, because
+                        the trailing remaining bar would normally own
+                        the right rounding. */}
                     <Bar dataKey="spent" stackId="a" animationDuration={600}
                       cursor="pointer"
-                      shape={(props: BudgetBarShapeProps) => (
+                      shape={(props: BudgetSpentBarShapeProps) => (
                         <BudgetSpentBarShape {...props} />
                       )}
                       onClick={(data) => {

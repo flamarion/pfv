@@ -15,6 +15,7 @@ import { input, label, btnPrimary, btnSecondary, card, cardHeader, cardTitle, pa
 import { PieChart, Pie, BarChart, Bar, XAxis, YAxis, Cell, Tooltip, ResponsiveContainer } from "recharts";
 import CategorySelect from "@/components/ui/CategorySelect";
 import { chartColor } from "@/lib/chart-colors";
+import { BudgetSpentBarShape, type BudgetSpentBarShapeProps } from "@/lib/chart-shapes";
 import OnTrackTile from "@/components/dashboard/OnTrackTile";
 import AccountMonthEndForecast, {
   type AccountMonthEndForecastResponse,
@@ -839,8 +840,16 @@ export default function DashboardPage() {
                         ]}
                         contentStyle={{ fontSize: "11px" }}
                       />
-                      <Bar dataKey="spent" stackId="a" radius={[4, 0, 0, 4]} animationDuration={600}
+                      {/* D5 follow-up: shared BudgetSpentBarShape so
+                          the spent bar rounds its right edge at >=100%
+                          utilization (when the trailing remaining
+                          segment collapses to zero). Static
+                          radius={[4,0,0,4]} left those rows squared. */}
+                      <Bar dataKey="spent" stackId="a" animationDuration={600}
                         cursor="pointer"
+                        shape={(props: BudgetSpentBarShapeProps) => (
+                          <BudgetSpentBarShape {...props} />
+                        )}
                         onClick={(_, idx) => {
                           const name = budgets.slice(0, 6)[idx]?.category_name;
                           if (name) setChartFilter(chartFilter === name ? null : name);
