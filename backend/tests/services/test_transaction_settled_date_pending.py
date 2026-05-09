@@ -1,6 +1,6 @@
 """Pending-row settled_date semantics (Punch-list Item 13).
 
-PR #163 enforced SETTLED ⇒ settled_date set. This file exercises the new
+PR #163 enforced SETTLED implies settled_date set. This file exercises the new
 contract that PENDING rows MAY carry a non-null settled_date as the
 "expected settlement date" used by ``effective_period_date_expr`` for
 period bucketing in forecasts/filters.
@@ -13,7 +13,7 @@ Coverage:
 - Create rejects settled_date < date at the schema layer.
 - Update a pending row to set settled_date later.
 - Update rejects settled_date < date.
-- Update flipping settled→pending without an explicit settled_date
+- Update flipping settled to pending without an explicit settled_date
   clears the actual settled_date (we don't want to leak the historical
   actual into the "expected" slot).
 """
@@ -88,7 +88,7 @@ async def test_create_pending_with_settled_date_persists(db_session):
     tx = await transaction_service.create_transaction(db_session, org.id, body)
     assert tx.status == TransactionStatus.PENDING
     assert tx.settled_date == dt.date(2026, 6, 15)
-    # Pending row → balance NOT applied.
+    # Pending row -> balance NOT applied.
     await db_session.refresh(acct)
     assert acct.balance == Decimal("0")
 
@@ -169,7 +169,7 @@ async def test_update_rejects_settled_date_before_date(db_session):
 
 
 async def test_update_settled_to_pending_clears_settled_date_without_explicit(db_session):
-    """Flipping settled→pending without supplying a new settled_date clears the
+    """Flipping settled to pending without supplying a new settled_date clears the
     historical actual; we don't repurpose a past actual as a future expectation.
     """
     org, acct, cat = await _seed_org_with_account(db_session)

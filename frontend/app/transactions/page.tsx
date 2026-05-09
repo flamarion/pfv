@@ -117,7 +117,7 @@ function TransactionsPageContent() {
   const [formDate, setFormDate] = useState(todayISO());
   // Expected settlement date for pending creates. Pre-filled with the
   // transaction date so the field is always populated when revealed
-  // (status=pending) — users can shift it forward for credit-card-style
+  // (status=pending). Users can shift it forward for credit-card-style
   // settlement lag without first having to discover the field is empty.
   const [formSettledDate, setFormSettledDate] = useState("");
   const [formRecurring, setFormRecurring] = useState(false);
@@ -1022,10 +1022,10 @@ function TransactionsPageContent() {
                       const linkedTx = isTransfer ? txMap.get(tx.linked_transaction_id!) : null;
                       return editingId === tx.id ? (
                         // Desktop edit mode: switched from a single 12-col row
-                        // (Item 7 audit — Status/Amount cols ~42px clipped both
+                        // (Item 7 audit: Status/Amount cols ~42px clipped both
                         // the select label and the type/amount split) to a
                         // labeled stacked form. Fields lay out 4-up so each
-                        // input gets ~22% of the row width — wide enough for
+                        // input gets ~22% of the row width, wide enough for
                         // the descriptive option labels ("Settled"/"Pending",
                         // "Expense"/"Income") that previously had to be hidden
                         // behind a !w-14 override.
@@ -1225,7 +1225,7 @@ function TransactionsPageContent() {
                             {/* Expected settlement subtext (Item 13). Surfaces
                                 only when the row is pending AND the user set a
                                 custom settlement date that differs from the
-                                transaction date — otherwise the subtext would
+                                transaction date. Otherwise the subtext would
                                 be redundant noise. */}
                             {tx.status === "pending" && tx.settled_date && tx.settled_date !== tx.date && (
                               <span

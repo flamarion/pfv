@@ -113,12 +113,12 @@ beforeEach(() => {
   });
 });
 
-describe("TransactionsPage — edit row layout (Punch-list Item 7)", () => {
+describe("TransactionsPage - edit row layout (Punch-list Item 7)", () => {
   it("desktop edit form renders all 7 inputs as labeled fields, not a clipped 12-col row", async () => {
     // Item 7 audit: in the legacy 12-col grid, Status was col-span-1 (~42px)
     // and Amount was col-span-1, both visibly clipping their inputs. The
     // rebalanced layout uses a labeled stacked grid (2-up on sm, 4-up on lg)
-    // so each input gets ≥22% of the row width. This test asserts the cell
+    // so each input gets >=22% of the row width. This test asserts the cell
     // containers exist and are NOT the legacy single-col-span elements.
     const tx = makeTx({ id: 70, description: "Edit me", status: "settled" });
     setupApiFetch([tx]);
@@ -135,7 +135,7 @@ describe("TransactionsPage — edit row layout (Punch-list Item 7)", () => {
     expect(editRow).toBeTruthy();
 
     // Every required edit field is reachable by aria-label and is not a
-    // clipped span — they are <input>/<select> inside their own cell.
+    // clipped span. They are <input>/<select> inside their own cell.
     // Multiple matches expected (desktop + mobile renders both in jsdom).
     expect(screen.getAllByLabelText("Date").length).toBeGreaterThan(0);
     expect(screen.getAllByLabelText("Description").length).toBeGreaterThan(0);
@@ -145,7 +145,7 @@ describe("TransactionsPage — edit row layout (Punch-list Item 7)", () => {
     expect(screen.getAllByLabelText("Type").length).toBeGreaterThan(0);
     expect(screen.getAllByLabelText("Amount").length).toBeGreaterThan(0);
 
-    // Status select shows full word labels (not glyphs) — this regressed
+    // Status select shows full word labels (not glyphs); this regressed
     // pre-fix because the col-span-1 width forced abbreviations.
     const statuses = screen.getAllByLabelText("Status");
     const desktopStatus = statuses.find((el) =>
@@ -192,21 +192,21 @@ describe("TransactionsPage — edit row layout (Punch-list Item 7)", () => {
   });
 });
 
-describe("TransactionsPage — settled_date (Punch-list Item 13)", () => {
+describe("TransactionsPage - settled_date (Punch-list Item 13)", () => {
   it("create form: settled date field shown ONLY when status=pending", async () => {
     setupApiFetch([]);
     render(<TransactionsPage />);
 
-    // Default status=settled → field hidden.
+    // Default status=settled -> field hidden.
     fireEvent.click(await screen.findByRole("button", { name: /\+ New Transaction/i }));
     expect(screen.queryByLabelText(/Expected settlement/i)).toBeNull();
 
-    // Switch to pending → field appears.
+    // Switch to pending -> field appears.
     const status = screen.getByLabelText("Status") as HTMLSelectElement;
     fireEvent.change(status, { target: { value: "pending" } });
     expect(screen.getByLabelText(/Expected settlement/i)).toBeTruthy();
 
-    // Back to settled → hidden again.
+    // Back to settled -> hidden again.
     fireEvent.change(status, { target: { value: "settled" } });
     expect(screen.queryByLabelText(/Expected settlement/i)).toBeNull();
   });

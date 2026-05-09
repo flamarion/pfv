@@ -478,7 +478,7 @@ async def update_transaction(
         #   silently no-op against the persisted value.
         settled_date_supplied = "settled_date" in body.model_fields_set
         if new_status == TransactionStatus.SETTLED:
-            # SETTLED rows must have a settled_date — clearing is illegal.
+            # SETTLED rows must have a settled_date (clearing is illegal).
             # An explicit null on transition gets the today fallback below.
             if body.settled_date is not None:
                 tx.settled_date = body.settled_date
@@ -490,7 +490,7 @@ async def update_transaction(
             if settled_date_supplied:
                 tx.settled_date = body.settled_date
             elif body.status is not None and old_status == TransactionStatus.SETTLED:
-                # Transitioning settled→pending without a supplied settled_date:
+                # Transitioning settled to pending without a supplied settled_date:
                 # clear the historical actual so it doesn't leak as an
                 # "expected" date for the now-pending row.
                 tx.settled_date = None

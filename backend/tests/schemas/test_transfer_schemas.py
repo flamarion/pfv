@@ -77,7 +77,7 @@ def test_transaction_create_accepts_settled_date_for_pending():
 
 
 def test_transaction_create_settled_date_optional():
-    """settled_date defaults to None — settled rows fall back to date in
+    """settled_date defaults to None. Settled rows fall back to date in
     the service layer, pending rows just don't have an expected date.
     """
     from app.schemas.transaction import TransactionCreate
