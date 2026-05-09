@@ -1,0 +1,607 @@
+"""Tag service tests (PR-Tags-A).
+
+Covers the spec's required scenarios:
+
+- Tag CRUD + uniqueness per org (collision returns ConflictError; two
+  orgs may each have their own ``insurance``).
+- Per-transaction tag cap of 5 (raises ValidationError before any
+  join row touches the DB).
+- ``suggest_tags`` precedence: org_co_category → org_recent →
+  shared_dictionary; gating on ``share_tag_data``; k-anonymity floor
+  of 3; seed bypass.
+- Cross-org dictionary contributor invariant: contributor_org_count
+  matches COUNT(DISTINCT contributor_org_id) at all times.
+
+Tests run on SQLite in-memory so the migration / dictionary seed are
+not exercised here (covered by tests/migrations/ ... and by the
+integration test path against MySQL when the team-tags-prA compose
+project is up).
+"""
+from __future__ import annotations
+
+import datetime
+from decimal import Decimal
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import event, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+
+from app.models import Base
+from app.models.account import Account, AccountType
+from app.models.category import Category, CategoryType
+from app.models.settings import OrgSetting
+from app.models.tag import (
+    Tag,
+    TagDictionary,
+    TagDictionaryContributor,
+    TransactionTag,
+)
+from app.models.transaction import Transaction, TransactionStatus, TransactionType
+from app.models.user import Organization, Role, User
+from app.security import hash_password
+from app.services import tag_service
+from app.services.exceptions import ConflictError, ValidationError
+
+
+@pytest_asyncio.fixture
+async def db_session():
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(Engine, "connect")
+    def _fk_on(dbapi_conn, _r):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        yield session
+    await engine.dispose()
+
+
+async def _make_org_user(db: AsyncSession, name: str) -> tuple[Organization, User]:
+    org = Organization(name=name, billing_cycle_day=1)
+    db.add(org)
+    await db.flush()
+    user = User(
+        org_id=org.id,
+        username=f"u-{name}",
+        email=f"u@{name}.example",
+        password_hash=hash_password("pw-1234567"),
+        role=Role.OWNER,
+        is_active=True,
+        email_verified=True,
+    )
+    db.add(user)
+    await db.flush()
+    return org, user
+
+
+async def _make_account_and_category(
+    db: AsyncSession, org_id: int, cat_type: CategoryType = CategoryType.EXPENSE
+) -> tuple[Account, Category]:
+    at = AccountType(
+        org_id=org_id, name="Checking", slug="checking", is_system=False
+    )
+    db.add(at)
+    await db.flush()
+    acc = Account(
+        org_id=org_id,
+        name="Main",
+        account_type_id=at.id,
+        currency="EUR",
+        balance=Decimal("1000.00"),
+        is_default=True,
+    )
+    db.add(acc)
+    cat = Category(
+        org_id=org_id, name="Insurance", slug="insurance",
+        is_system=False, type=cat_type,
+    )
+    db.add(cat)
+    await db.flush()
+    return acc, cat
+
+
+async def _make_transaction(
+    db: AsyncSession,
+    org_id: int,
+    account_id: int,
+    category_id: int,
+    *,
+    amount: Decimal = Decimal("10.00"),
+    tx_type: TransactionType = TransactionType.EXPENSE,
+    date: datetime.date = datetime.date(2026, 5, 1),
+) -> Transaction:
+    tx = Transaction(
+        org_id=org_id,
+        account_id=account_id,
+        category_id=category_id,
+        description="Monthly premium",
+        amount=amount,
+        type=tx_type,
+        status=TransactionStatus.SETTLED,
+        date=date,
+        settled_date=date,
+    )
+    db.add(tx)
+    await db.flush()
+    return tx
+
+
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_strips_lowercases_collapses_whitespace():
+    assert tag_service.normalize_tag_name("  Insurance  ") == "insurance"
+    assert tag_service.normalize_tag_name("Vacation 2026") == "vacation 2026"
+    assert tag_service.normalize_tag_name("Work\t\t\tTravel") == "work travel"
+
+
+def test_normalize_rejects_empty_and_too_long():
+    with pytest.raises(ValidationError):
+        tag_service.normalize_tag_name("")
+    with pytest.raises(ValidationError):
+        tag_service.normalize_tag_name("   ")
+    with pytest.raises(ValidationError):
+        tag_service.normalize_tag_name("a" * 33)
+
+
+def test_normalize_rejects_disallowed_characters():
+    for bad in ("hello#world", "tag@home", "café", "100%"):
+        with pytest.raises(ValidationError):
+            tag_service.normalize_tag_name(bad)
+
+
+# ---------------------------------------------------------------------------
+# CRUD + per-org uniqueness
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_tag_succeeds_and_persists(db_session):
+    org, user = await _make_org_user(db_session, "alpha")
+    await db_session.commit()
+
+    tag = await tag_service.create_tag(
+        db_session, org_id=org.id, name="Insurance", created_by_user_id=user.id
+    )
+    await db_session.commit()
+    await db_session.refresh(tag)
+    assert tag.name == "Insurance"
+    assert tag.name_normalized == "insurance"
+
+
+@pytest.mark.asyncio
+async def test_create_tag_collision_within_org_raises_conflict(db_session):
+    org, user = await _make_org_user(db_session, "alpha")
+    await db_session.commit()
+    await tag_service.create_tag(
+        db_session, org_id=org.id, name="Insurance", created_by_user_id=user.id
+    )
+    await db_session.commit()
+    with pytest.raises(ConflictError):
+        await tag_service.create_tag(
+            db_session, org_id=org.id, name="INSURANCE", created_by_user_id=user.id
+        )
+
+
+@pytest.mark.asyncio
+async def test_two_orgs_each_have_own_insurance_tag(db_session):
+    org_a, user_a = await _make_org_user(db_session, "a")
+    org_b, user_b = await _make_org_user(db_session, "b")
+    await db_session.commit()
+
+    await tag_service.create_tag(
+        db_session, org_id=org_a.id, name="insurance", created_by_user_id=user_a.id
+    )
+    await tag_service.create_tag(
+        db_session, org_id=org_b.id, name="insurance", created_by_user_id=user_b.id
+    )
+    await db_session.commit()
+
+    rows = (await db_session.execute(select(Tag))).scalars().all()
+    assert len(rows) == 2
+    assert {t.org_id for t in rows} == {org_a.id, org_b.id}
+
+
+@pytest.mark.asyncio
+async def test_rename_tag_collision_raises_conflict(db_session):
+    org, user = await _make_org_user(db_session, "alpha")
+    await db_session.commit()
+    a = await tag_service.create_tag(
+        db_session, org_id=org.id, name="auto", created_by_user_id=user.id
+    )
+    await tag_service.create_tag(
+        db_session, org_id=org.id, name="house", created_by_user_id=user.id
+    )
+    await db_session.commit()
+    with pytest.raises(ConflictError):
+        await tag_service.rename_tag(
+            db_session, org_id=org.id, tag_id=a.id, new_name="house"
+        )
+
+
+@pytest.mark.asyncio
+async def test_delete_tag_cascades_join_rows(db_session):
+    org, user = await _make_org_user(db_session, "alpha")
+    acc, cat = await _make_account_and_category(db_session, org.id)
+    tx = await _make_transaction(db_session, org.id, acc.id, cat.id)
+    await db_session.commit()
+
+    tag = await tag_service.create_tag(
+        db_session, org_id=org.id, name="insurance", created_by_user_id=user.id
+    )
+    await db_session.commit()
+    await tag_service.set_transaction_tags(
+        db_session,
+        org_id=org.id,
+        transaction_id=tx.id,
+        tag_names=["insurance"],
+        created_by_user_id=user.id,
+    )
+    await db_session.commit()
+    join_rows = (await db_session.execute(select(TransactionTag))).all()
+    assert len(join_rows) == 1
+
+    await tag_service.delete_tag(db_session, org_id=org.id, tag_id=tag.id)
+    await db_session.commit()
+    join_rows = (await db_session.execute(select(TransactionTag))).all()
+    assert join_rows == []
+
+
+# ---------------------------------------------------------------------------
+# Per-transaction cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_set_transaction_tags_enforces_cap_of_5(db_session):
+    org, user = await _make_org_user(db_session, "alpha")
+    acc, cat = await _make_account_and_category(db_session, org.id)
+    tx = await _make_transaction(db_session, org.id, acc.id, cat.id)
+    await db_session.commit()
+
+    six = ["t1", "t2", "t3", "t4", "t5", "t6"]
+    with pytest.raises(ValidationError):
+        await tag_service.set_transaction_tags(
+            db_session,
+            org_id=org.id,
+            transaction_id=tx.id,
+            tag_names=six,
+            created_by_user_id=user.id,
+        )
+    # No tags or join rows leaked through.
+    assert (await db_session.execute(select(Tag))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_set_transaction_tags_dedupes_before_cap(db_session):
+    """Submitting the same tag twice (different casing) counts as one."""
+    org, user = await _make_org_user(db_session, "alpha")
+    acc, cat = await _make_account_and_category(db_session, org.id)
+    tx = await _make_transaction(db_session, org.id, acc.id, cat.id)
+    await db_session.commit()
+
+    # 6 entries but only 5 distinct after normalize — should NOT raise.
+    tags = await tag_service.set_transaction_tags(
+        db_session,
+        org_id=org.id,
+        transaction_id=tx.id,
+        tag_names=["a", "B", "c", "D", "e", "A"],
+        created_by_user_id=user.id,
+    )
+    await db_session.commit()
+    assert len(tags) == 5
+
+
+@pytest.mark.asyncio
+async def test_set_transaction_tags_replaces_existing(db_session):
+    org, user = await _make_org_user(db_session, "alpha")
+    acc, cat = await _make_account_and_category(db_session, org.id)
+    tx = await _make_transaction(db_session, org.id, acc.id, cat.id)
+    await db_session.commit()
+    await tag_service.set_transaction_tags(
+        db_session,
+        org_id=org.id,
+        transaction_id=tx.id,
+        tag_names=["insurance", "monthly"],
+        created_by_user_id=user.id,
+    )
+    await db_session.commit()
+    # Replace with new set — old entries must be detached.
+    await tag_service.set_transaction_tags(
+        db_session,
+        org_id=org.id,
+        transaction_id=tx.id,
+        tag_names=["business"],
+        created_by_user_id=user.id,
+    )
+    await db_session.commit()
+    rows = (
+        await db_session.execute(select(TransactionTag))
+    ).all()
+    assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# Suggestion endpoint passes
+# ---------------------------------------------------------------------------
+
+
+async def _enable_share_tag_data(db: AsyncSession, org_id: int) -> None:
+    db.add(OrgSetting(org_id=org_id, key="share_tag_data", value="true"))
+
+
+@pytest.mark.asyncio
+async def test_suggest_org_co_category_returns_category_correlated(db_session):
+    org, user = await _make_org_user(db_session, "alpha")
+    acc, cat = await _make_account_and_category(db_session, org.id)
+    other_cat = Category(
+        org_id=org.id, name="Travel", slug="travel",
+        is_system=False, type=CategoryType.EXPENSE,
+    )
+    db_session.add(other_cat)
+    await db_session.flush()
+    tx_a = await _make_transaction(db_session, org.id, acc.id, cat.id)
+    tx_b = await _make_transaction(
+        db_session, org.id, acc.id, cat.id,
+        date=datetime.date(2026, 4, 1),
+    )
+    tx_c = await _make_transaction(
+        db_session, org.id, acc.id, other_cat.id,
+        date=datetime.date(2026, 3, 1),
+    )
+    await db_session.commit()
+
+    await tag_service.set_transaction_tags(
+        db_session, org_id=org.id, transaction_id=tx_a.id,
+        tag_names=["insurance"], created_by_user_id=user.id,
+    )
+    await tag_service.set_transaction_tags(
+        db_session, org_id=org.id, transaction_id=tx_b.id,
+        tag_names=["insurance"], created_by_user_id=user.id,
+    )
+    # tx_c (different category) gets a different tag — should NOT
+    # appear when we filter by cat.id.
+    await tag_service.set_transaction_tags(
+        db_session, org_id=org.id, transaction_id=tx_c.id,
+        tag_names=["vacation"], created_by_user_id=user.id,
+    )
+    await db_session.commit()
+
+    res = await tag_service.suggest_tags(
+        db_session,
+        org_id=org.id,
+        prefix=None,
+        category_id=cat.id,
+        limit=10,
+    )
+    names = [s.name for s in res]
+    sources = [s.source for s in res]
+    assert "insurance" in names
+    # The first hit must be from the org_co_category pass.
+    assert res[0].source == "org_co_category"
+    assert res[0].name == "insurance"
+    # vacation from the other category may surface in the org_recent
+    # pass (with weight=1) but never in pass-1.
+    if "vacation" in names:
+        idx = names.index("vacation")
+        assert sources[idx] in ("org_recent",)
+
+
+@pytest.mark.asyncio
+async def test_suggest_org_recent_picks_up_uncategorized_org_tags(db_session):
+    """A tag the org has created but never attached to a transaction in
+    the queried category must surface via the org_recent pass."""
+    org, user = await _make_org_user(db_session, "alpha")
+    acc, cat = await _make_account_and_category(db_session, org.id)
+    await db_session.commit()
+    # Standalone tag, no transactions.
+    await tag_service.create_tag(
+        db_session, org_id=org.id, name="business",
+        created_by_user_id=user.id,
+    )
+    await db_session.commit()
+    res = await tag_service.suggest_tags(
+        db_session,
+        org_id=org.id,
+        prefix="bus",
+        category_id=cat.id,
+        limit=10,
+    )
+    assert any(s.name == "business" and s.source == "org_recent" for s in res)
+
+
+@pytest.mark.asyncio
+async def test_suggest_skips_dictionary_when_share_disabled(db_session):
+    """Without ``share_tag_data=true`` the dictionary pass is excluded
+    even when entries with high contributor counts exist."""
+    org, user = await _make_org_user(db_session, "alpha")
+    await db_session.commit()
+    # Seed a high-contributor dictionary entry directly.
+    entry = TagDictionary(
+        name_normalized="insurance",
+        contributor_org_count=10,
+        usage_count=100,
+        is_seed=False,
+    )
+    db_session.add(entry)
+    await db_session.commit()
+
+    res = await tag_service.suggest_tags(
+        db_session,
+        org_id=org.id,
+        prefix="ins",
+        category_id=None,
+        limit=10,
+    )
+    assert all(s.source != "shared_dictionary" for s in res)
+
+
+@pytest.mark.asyncio
+async def test_suggest_dictionary_pass_honors_k_anonymity_floor(db_session):
+    """With sharing on, dictionary entries below the floor (3) are NOT
+    surfaced. Only entries at-or-above the floor (or seeded) appear."""
+    org, _user = await _make_org_user(db_session, "alpha")
+    await _enable_share_tag_data(db_session, org.id)
+    db_session.add_all([
+        TagDictionary(
+            name_normalized="below",
+            contributor_org_count=2,  # below floor of 3
+            usage_count=99,
+            is_seed=False,
+        ),
+        TagDictionary(
+            name_normalized="above",
+            contributor_org_count=3,  # at floor
+            usage_count=10,
+            is_seed=False,
+        ),
+    ])
+    await db_session.commit()
+
+    res = await tag_service.suggest_tags(
+        db_session,
+        org_id=org.id,
+        prefix=None,
+        category_id=None,
+        limit=10,
+    )
+    names = [s.name for s in res]
+    assert "above" in names
+    assert "below" not in names
+
+
+@pytest.mark.asyncio
+async def test_suggest_seed_bypasses_floor(db_session):
+    """``is_seed=True`` rows surface even at zero contributors."""
+    org, _user = await _make_org_user(db_session, "alpha")
+    await _enable_share_tag_data(db_session, org.id)
+    db_session.add(TagDictionary(
+        name_normalized="gym",
+        contributor_org_count=0,
+        usage_count=0,
+        is_seed=True,
+    ))
+    await db_session.commit()
+    res = await tag_service.suggest_tags(
+        db_session,
+        org_id=org.id,
+        prefix="g",
+        category_id=None,
+        limit=10,
+    )
+    assert any(s.name == "gym" and s.source == "shared_dictionary" for s in res)
+
+
+# ---------------------------------------------------------------------------
+# Cross-org contribution invariant
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_contribution_writes_only_when_share_enabled(db_session):
+    """Without the toggle, no rows enter ``tag_dictionary`` or
+    ``tag_dictionary_contributors`` for org-local tag creates."""
+    org, user = await _make_org_user(db_session, "alpha")
+    await db_session.commit()
+    await tag_service.create_tag(
+        db_session, org_id=org.id, name="insurance",
+        created_by_user_id=user.id,
+    )
+    await db_session.commit()
+    rows = (await db_session.execute(select(TagDictionary))).scalars().all()
+    contrib = (await db_session.execute(
+        select(TagDictionaryContributor)
+    )).scalars().all()
+    assert rows == []
+    assert contrib == []
+
+
+@pytest.mark.asyncio
+async def test_contribution_increments_count_only_first_time_per_org(db_session):
+    """Two creates of the same tag (which can't actually happen in
+    one org because of the unique constraint, but drives the
+    deduper directly) must not double-bump the count."""
+    org, user = await _make_org_user(db_session, "alpha")
+    await _enable_share_tag_data(db_session, org.id)
+    await db_session.commit()
+
+    await tag_service.create_tag(
+        db_session, org_id=org.id, name="insurance",
+        created_by_user_id=user.id,
+    )
+    await db_session.commit()
+    # Drive the contribution path again directly — this simulates a
+    # rename-and-re-add cycle. The unique constraint must keep the
+    # count stable.
+    await tag_service._record_dictionary_contribution(
+        db_session, org_id=org.id, name_normalized="insurance",
+    )
+    await db_session.commit()
+
+    entry = (await db_session.execute(
+        select(TagDictionary).where(
+            TagDictionary.name_normalized == "insurance"
+        )
+    )).scalar_one()
+    contrib_count = (await db_session.execute(
+        select(TagDictionaryContributor).where(
+            TagDictionaryContributor.dictionary_tag_id == entry.id,
+        )
+    )).scalars().all()
+    assert entry.contributor_org_count == 1
+    assert len(contrib_count) == 1
+
+
+@pytest.mark.asyncio
+async def test_contribution_counts_distinct_orgs(db_session):
+    """Three orgs contributing the same tag → count == 3."""
+    orgs = []
+    for name in ("a", "b", "c"):
+        org, user = await _make_org_user(db_session, name)
+        await _enable_share_tag_data(db_session, org.id)
+        orgs.append((org, user))
+    await db_session.commit()
+    for org, user in orgs:
+        await tag_service.create_tag(
+            db_session, org_id=org.id, name="insurance",
+            created_by_user_id=user.id,
+        )
+        await db_session.commit()
+
+    entry = (await db_session.execute(
+        select(TagDictionary).where(
+            TagDictionary.name_normalized == "insurance"
+        )
+    )).scalar_one()
+    assert entry.contributor_org_count == 3
+
+
+@pytest.mark.asyncio
+async def test_contribution_skips_long_or_multi_hyphen_tags(db_session):
+    """Privacy guard: tags > 16 chars or with > 1 hyphen group never
+    enter the dictionary."""
+    org, user = await _make_org_user(db_session, "alpha")
+    await _enable_share_tag_data(db_session, org.id)
+    await db_session.commit()
+    # 21 chars, 2 hyphen groups — both rules would block it.
+    await tag_service.create_tag(
+        db_session, org_id=org.id, name="vacation-divorce-trip",
+        created_by_user_id=user.id,
+    )
+    await db_session.commit()
+    rows = (await db_session.execute(select(TagDictionary))).scalars().all()
+    assert rows == []
