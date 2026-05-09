@@ -340,7 +340,6 @@ function ImportPageContent() {
         </div>
       )}
 
-      {/* ── Expected file format help ────────────────────────────────── */}
       {step === "upload" && categories && categories.length > 0 && (
         <CsvFormatHelp />
       )}

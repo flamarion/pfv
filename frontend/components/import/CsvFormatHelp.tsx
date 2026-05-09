@@ -20,7 +20,7 @@ import { btnLink, btnSecondary, card } from "@/lib/styles";
  *   - Encoding: UTF-8. A leading BOM is tolerated.
  *
  * Other locales (US "." decimal, ISO dates, different headers) are not
- * supported yet — see project_localized_import_intelligence.md.
+ * supported yet (see project_localized_import_intelligence.md).
  */
 
 const SAMPLE_CSV =
