@@ -11,7 +11,7 @@ as the single source of truth for cross-org contribution tracking.
 
 Four tables:
 
-1. ``tags`` — per-org user-defined tags. ``UNIQUE(org_id, name_normalized)``
+1. ``tags`` - per-org user-defined tags. ``UNIQUE(org_id, name_normalized)``
    so two orgs may each have their own ``insurance`` tag without collision.
    ``name_normalized`` is filled at write time from
    ``app.services.tag_service.normalize_tag_name`` (lowercased, trimmed,
@@ -22,18 +22,18 @@ Four tables:
    pins uniqueness, and a CHECK or trigger isn't needed because all writes
    go through the service.
 
-2. ``transaction_tags`` — many-to-many join.
+2. ``transaction_tags`` - many-to-many join.
    ``ON DELETE CASCADE`` on both FKs: transaction delete cleans up the
    join row; tag delete detaches from all transactions.
    PK is ``(transaction_id, tag_id)`` so the cover for the FK on
    ``transaction_id`` is the leading column. An explicit
    ``ix_transaction_tags_tag`` covers the FK on ``tag_id``.
 
-3. ``tag_dictionary`` — cross-org public-shape table. Read-side surface
+3. ``tag_dictionary`` - cross-org public-shape table. Read-side surface
    for the suggestion endpoint. Columns: ``(name_normalized,
    contributor_org_count, usage_count, is_seed, ...)``. NO FK to orgs.
 
-4. ``tag_dictionary_contributors`` — cross-org PRIVATE table.
+4. ``tag_dictionary_contributors`` - cross-org PRIVATE table.
    ``(dictionary_tag_id FK tag_dictionary, contributor_org_id FK
    organizations)`` with ``UNIQUE(dictionary_tag_id, contributor_org_id)``.
    This is the source of truth for the k-anonymity floor. NEVER exposed
@@ -53,7 +53,7 @@ Seed list (final for v1):
 
 These are deliberately short, generic, and cross-locale. Personal or
 specific tags (``vacation-divorce-trip``, ``kids-school-2026``) are
-intentionally absent — they would only enter the dictionary via the
+intentionally absent: they would only enter the dictionary via the
 contribution path, which has its own length/hyphen-group guard.
 
 **Migration ordering note (rebase expected).** This migration's
@@ -78,12 +78,19 @@ depends_on = None
 
 def upgrade() -> None:
     # 1. Per-org tags table.
+    # ON DELETE CASCADE on org_id matches the convention used for
+    # transaction_tags to tags. When an org is deleted via
+    # admin_orgs_service.delete_org_cascade, the wipe path explicitly
+    # deletes tags before the org row, but the CASCADE here is defense
+    # in depth (and keeps the FK consistent with the rest of the schema
+    # where org-scoped data cascades on org delete).
     op.create_table(
         "tags",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column(
             "org_id", sa.Integer(),
-            sa.ForeignKey("organizations.id"), nullable=False,
+            sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+            nullable=False,
         ),
         sa.Column("name", sa.String(32), nullable=False),
         sa.Column("name_normalized", sa.String(32), nullable=False),

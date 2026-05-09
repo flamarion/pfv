@@ -55,7 +55,10 @@ class Tag(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("organizations.id"), nullable=False, index=True
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     name: Mapped[str] = mapped_column(String(32), nullable=False)
     name_normalized: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -141,12 +144,12 @@ class TagDictionary(Base):
 
 
 class TagDictionaryContributor(Base):
-    """Cross-org PRIVATE contributors table — server-internal only.
+    """Cross-org PRIVATE contributors table, server-internal only.
 
     Source of truth for the k-anonymity floor. Each row says "this org
     has contributed this dictionary tag at least once." Unique constraint
     on ``(dictionary_tag_id, contributor_org_id)`` enforces one row per
-    org per tag — the dedupe mechanism for the count.
+    org per tag, the dedupe mechanism for the count.
 
     **This table is never read by any API endpoint, never serialized in
     any response, never surfaced to admins or users.** The suggestion
