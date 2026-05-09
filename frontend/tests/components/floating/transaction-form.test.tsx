@@ -102,6 +102,7 @@ describe("TransactionForm", () => {
       <TransactionForm
         accounts={[ACCT]}
         categories={[CAT]}
+        defaultCategoryId={CAT.id}
         onSaved={onSaved}
       />,
     );
@@ -166,5 +167,83 @@ describe("TransactionForm", () => {
     );
     const account = screen.getByLabelText("Account") as HTMLSelectElement;
     expect(account.value).toBe(String(SAVINGS.id));
+  });
+
+  it("Save and add new respects native validation: blank required fields skip the network call", async () => {
+    const apiFetchMock = vi.mocked(apiFetch);
+    apiFetchMock.mockReset();
+    apiFetchMock.mockResolvedValue({} as never);
+
+    const onSaved = vi.fn();
+
+    render(
+      <TransactionForm
+        accounts={[ACCT]}
+        categories={[CAT]}
+        defaultCategoryId={CAT.id}
+        onSaved={onSaved}
+      />,
+    );
+
+    // Description and amount are blank: the form is invalid. The
+    // browser's requestSubmit() must skip onSubmit, so apiFetch must
+    // never be called.
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /save and add new/i }),
+      );
+    });
+
+    // Give any pending microtasks a chance to flush.
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(apiFetchMock).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it("Save and add new submits when fields are valid and resets description and amount while keeping the panel open", async () => {
+    const apiFetchMock = vi.mocked(apiFetch);
+    apiFetchMock.mockReset();
+    apiFetchMock.mockResolvedValue({} as never);
+
+    const onSaved = vi.fn();
+    const onTransactionAdded = vi.fn();
+
+    render(
+      <TransactionForm
+        accounts={[ACCT]}
+        categories={[CAT]}
+        defaultCategoryId={CAT.id}
+        onSaved={onSaved}
+        onTransactionAdded={onTransactionAdded}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "Coffee" },
+    });
+    fireEvent.change(screen.getByLabelText("Amount"), {
+      target: { value: "3.50" },
+    });
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /save and add new/i }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    });
+    expect(onTransactionAdded).toHaveBeenCalledTimes(1);
+    // Panel stays open.
+    expect(onSaved).not.toHaveBeenCalled();
+    // Description and amount reset; account preserved.
+    const desc = screen.getByLabelText("Description") as HTMLInputElement;
+    const amount = screen.getByLabelText("Amount") as HTMLInputElement;
+    const account = screen.getByLabelText("Account") as HTMLSelectElement;
+    expect(desc.value).toBe("");
+    expect(amount.value).toBe("");
+    expect(account.value).toBe(String(ACCT.id));
   });
 });

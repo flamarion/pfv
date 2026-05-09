@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, MouseEvent, useEffect, useRef, useState } from "react";
 
 import CategorySelect from "@/components/ui/CategorySelect";
 import { apiFetch, extractErrorMessage } from "@/lib/api";
@@ -38,6 +38,12 @@ import type { Account, Category } from "@/lib/types";
  *   - Default Save submits + closes the panel via onSaved().
  *   - "Save & add new" submits + clears the form fields, leaves the
  *     panel open, and refocuses the description input.
+ *   - Both buttons route through the same form onSubmit handler so
+ *     native HTML5 validation (the `required` attributes, `min` on
+ *     amount, etc.) runs before any network call. "Save and add new"
+ *     uses an intent ref + form.requestSubmit() so the browser shows
+ *     its built-in validation messages and skips the submit when a
+ *     required field is empty.
  */
 
 export interface TransactionFormProps {
@@ -87,6 +93,11 @@ export default function TransactionForm({
   const [submitting, setSubmitting] = useState(false);
   const [errMsg, setErrMsg] = useState("");
   const descRef = useRef<HTMLInputElement>(null);
+  // Tracks whether the next submit should keep the panel open and clear
+  // the form ("Save and add new") or close on success ("Save"). The
+  // "Save and add new" button calls form.requestSubmit() so the browser
+  // runs native validation before the onSubmit handler reads this.
+  const submitIntentRef = useRef<"save" | "save-and-add-new">("save");
 
   // If the parent updates the defaults (e.g. accounts finished loading
   // after the panel mounted), pick them up so the form isn't stuck on
@@ -153,7 +164,27 @@ export default function TransactionForm({
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
-    void submit(false);
+    const addAnother = submitIntentRef.current === "save-and-add-new";
+    // Reset eagerly so a later plain Save submit defaults to closing the
+    // panel. The async submit() reads `addAnother` from the local above.
+    submitIntentRef.current = "save";
+    void submit(addAnother);
+  }
+
+  function handleSaveAndAddNewClick(e: MouseEvent<HTMLButtonElement>) {
+    submitIntentRef.current = "save-and-add-new";
+    // requestSubmit() triggers the form's native validation (required,
+    // min, type=number, etc.) and only fires onSubmit when the form is
+    // valid. If validation fails, the browser shows its built-in
+    // messages and no network call happens.
+    const form = e.currentTarget.form;
+    if (form) {
+      form.requestSubmit();
+    } else {
+      // Fallback for the rare case the button is rendered outside a
+      // form (shouldn't happen here, but keeps the handler safe).
+      submitIntentRef.current = "save";
+    }
   }
 
   const hasAccountsAndCategories =
@@ -290,7 +321,7 @@ export default function TransactionForm({
       <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
         <button
           type="button"
-          onClick={() => void submit(true)}
+          onClick={handleSaveAndAddNewClick}
           disabled={submitting}
           className={`${btnSecondary} min-h-[44px]`}
         >
