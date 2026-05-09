@@ -1,19 +1,19 @@
 """C0 contract tests for the Categories foundation.
 
-Covers every test bullet in §8 of the spec at
+Covers every test bullet in section 8 of the spec at
 ``~/.claude/projects/-Users-fjorge-src-pfv/specs/2026-05-09-categories-c0-invariants.md``:
 
 - Invariant 1 (1+1+1+1 floor)
-- Invariant 2 (live cascade — rename, move don't write dependent rows)
+- Invariant 2 (live cascade: rename, move don't write dependent rows)
 - Invariant 3 (delete-with-migration target requirement and bulk update)
 - Invariant 4 (last-in-type 409)
-- Invariant 5 (cascade affects forecasts and budgets — counts surfaced)
+- Invariant 5 (cascade affects forecasts and budgets: counts surfaced)
 - Move preview (read-only)
-- Cross-master subcategory uniqueness on move (§4.5)
+- Cross-master subcategory uniqueness on move (section 4.5)
 - Resolution C atomicity (batch move)
 - Resolution D audit trail
-- §4.6 BOTH-source migration target compatibility matrix
-- §4.7 Master-with-children delete protection
+- Section 4.6 BOTH-source migration target compatibility matrix
+- Section 4.7 Master-with-children delete protection
 """
 from __future__ import annotations
 
@@ -255,7 +255,7 @@ async def _add_forecast_item(
         return item.id
 
 
-# ── Invariant 1 (1+1+1+1 floor) ─────────────────────────────────────────────
+# --- Invariant 1 (1+1+1+1 floor) -------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -272,7 +272,7 @@ async def test_floor_held_after_seed(session_factory):
     assert counts["expense_subs"] >= 1
 
 
-# ── Invariant 2 (live cascade) ──────────────────────────────────────────────
+# --- Invariant 2 (live cascade) --------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -332,7 +332,7 @@ async def test_move_does_not_rewrite_transaction_category_id(session_factory):
         assert cat.parent_id == seed["lifestyle_master_id"]
 
 
-# ── Invariant 3 (delete-with-migration) ─────────────────────────────────────
+# --- Invariant 3 (delete-with-migration) -----------------------------------
 
 
 @pytest.mark.asyncio
@@ -466,7 +466,7 @@ async def test_delete_with_incompatible_target_type_returns_400(session_factory)
 
 @pytest.mark.asyncio
 async def test_delete_master_with_children_returns_409(session_factory):
-    """§4.7: master with children -> 409 has_children, regardless of target."""
+    """Section 4.7: master with children -> 409 has_children, regardless of target."""
     seed = await _seed_basic(session_factory)
     app = make_app(session_factory)
     with TestClient(app) as client:
@@ -481,7 +481,7 @@ async def test_delete_master_with_children_returns_409(session_factory):
 
 @pytest.mark.asyncio
 async def test_delete_master_with_children_and_target_still_409(session_factory):
-    """§4.7: target does NOT adopt children."""
+    """Section 4.7: target does NOT adopt children."""
     seed = await _seed_basic(session_factory)
     app = make_app(session_factory)
     with TestClient(app) as client:
@@ -517,7 +517,7 @@ async def test_delete_subcategory_also_deletes_source_budget_row(session_factory
         assert gone is None
 
 
-# ── §4.6 BOTH-source migration target compatibility ────────────────────────
+# --- Section 4.6 BOTH-source migration target compatibility ---------------
 
 
 @pytest.mark.asyncio
@@ -645,7 +645,7 @@ async def test_delete_both_with_empty_dependents_falls_through_to_204(session_fa
     assert resp.status_code == 204
 
 
-# ── Invariant 4 (last-in-type) ──────────────────────────────────────────────
+# --- Invariant 4 (last-in-type) --------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -686,7 +686,7 @@ async def test_delete_last_income_master_returns_409(session_factory):
     assert resp.json()["detail"]["detail"] in {"has_children", "last_in_type"}
 
 
-# ── Move preview (read-only) ────────────────────────────────────────────────
+# --- Move preview (read-only) ----------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -760,7 +760,7 @@ async def test_move_preview_returns_400_for_invalid_target(session_factory):
     assert resp.status_code == 400
 
 
-# ── Cross-master subcategory uniqueness on move (§4.5) ──────────────────────
+# --- Cross-master subcategory uniqueness on move (section 4.5) -------------
 
 
 @pytest.mark.asyncio
@@ -856,7 +856,7 @@ async def test_batch_move_rejects_whole_batch_on_name_collision(session_factory)
         assert rows == []
 
 
-# ── Resolution C atomicity (batch move) ─────────────────────────────────────
+# --- Resolution C atomicity (batch move) -----------------------------------
 
 
 @pytest.mark.asyncio
@@ -934,7 +934,7 @@ async def test_batch_move_writes_one_audit_row_with_summary(session_factory):
         assert len(detail["moves"]) == 2
 
 
-# ── Resolution D audit trail ────────────────────────────────────────────────
+# --- Resolution D audit trail ----------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1030,7 +1030,7 @@ async def test_category_created_writes_audit_row(session_factory):
 
 @pytest.mark.asyncio
 async def test_org_bootstrap_seed_does_not_write_audit_rows(session_factory):
-    """The seed path runs without a human actor; per §D resolution it
+    """The seed path runs without a human actor; per section D resolution it
     is structlog-only."""
     from app.services.org_bootstrap_service import seed_org_defaults
 
@@ -1049,7 +1049,7 @@ async def test_org_bootstrap_seed_does_not_write_audit_rows(session_factory):
         assert rows == []
 
 
-# ── Migration backfill ──────────────────────────────────────────────────────
+# --- Migration backfill ----------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1091,7 +1091,7 @@ async def test_assert_min_floor_for_org_raises_when_under_floor(session_factory)
             await assert_min_floor_for_org(db, org_id=org.id)
 
 
-# ── Misc smoke ──────────────────────────────────────────────────────────────
+# --- Misc smoke ------------------------------------------------------------
 
 
 @pytest.mark.asyncio

@@ -18,9 +18,9 @@ type-compatibility invariant on PUT (rename/type change). The C0 spec
   floor (>= 1 income master, >= 1 income subcategory, >= 1 expense
   master, >= 1 expense subcategory). Deletes that would drop the org
   below the floor are rejected.
-- Master-with-children guard (§4.7).
-- BOTH-source migration target compatibility (§4.6).
-- Cross-master subcategory name uniqueness on move (§4.5).
+- Master-with-children guard (section 4.7).
+- BOTH-source migration target compatibility (section 4.6).
+- Cross-master subcategory name uniqueness on move (section 4.5).
 
 Audit events are staged in-transaction via
 ``audit_service.add_audit_event_to_session`` so the audit row commits
@@ -54,7 +54,7 @@ from app.services.exceptions import ConflictError, NotFoundError, ValidationErro
 logger = structlog.stdlib.get_logger()
 
 
-# ── Existing type-compatibility guard helpers ───────────────────────────────
+# --- Existing type-compatibility guard helpers ------------------------------
 
 
 def _txn_type_compatible(cat_type: CategoryType, tx_type: TransactionType) -> bool:
@@ -255,13 +255,13 @@ async def validate_category_type_change(
     )
 
 
-# ── C0 helpers ──────────────────────────────────────────────────────────────
+# --- C0 helpers -------------------------------------------------------------
 
 
 def normalize_category_name(name: str) -> str:
     """Normalize a category name for collision detection.
 
-    ``" ".join(name.strip().lower().split())`` per §4.5 of the spec:
+    ``" ".join(name.strip().lower().split())`` per section 4.5 of the spec:
     strip, lowercase, collapse internal whitespace runs to a single
     space.
     """
@@ -292,7 +292,7 @@ async def _dependent_breakdown(
 ) -> _DependentBreakdown:
     """Compute the income/expense breakdown across the three dependent tables.
 
-    Used by §4.6 BOTH-source migration target compatibility.
+    Used by section 4.6 BOTH-source migration target compatibility.
     """
     tx_income = await db.scalar(
         select(func.count())
@@ -422,7 +422,7 @@ async def _floor_counts_for_org(
         )
     ) or 0
 
-    # Subcategory counts — distinguish by the master's type, not the
+    # Subcategory counts: distinguish by the master's type, not the
     # subcategory's own type column. Per the codebase invariant
     # "child.type == master.type" they are equal in healthy state, but
     # the floor's source of truth is the master's type so degenerate
@@ -526,7 +526,7 @@ async def assert_min_floor_after_delete(
                 raise ConflictError("last_in_type")
         # CategoryType.BOTH masters do not contribute to either floor and
         # have no floor-triggered protection here. (Master-with-children
-        # protection still applies via the §4.7 has_children guard.)
+        # protection still applies via the section 4.7 has_children guard.)
     else:
         # Subcategory delete. Floor depends on the master's type.
         master = await db.scalar(
@@ -704,7 +704,7 @@ def _parse_floor_violation_detail(detail: str) -> dict:
     return _floor_violation_detail(parts[1], parts[2])
 
 
-# ── Move ────────────────────────────────────────────────────────────────────
+# --- Move -------------------------------------------------------------------
 
 
 async def _resolve_for_move(
@@ -715,7 +715,7 @@ async def _resolve_for_move(
     Validates: subcategory is a subcategory (parent_id IS NOT NULL),
     target is a master (parent_id IS NULL), both belong to org_id, types
     are compatible (the subcategory's type must match the target's
-    type — child.type == master.type invariant), no name collision under
+    type (child.type == master.type invariant), no name collision under
     the target.
 
     Raises ``NotFoundError``, ``ValidationError``, or ``ConflictError``.
@@ -768,7 +768,7 @@ async def _resolve_for_move(
         # user should file a different ticket.
         raise NotFoundError("Source master")
 
-    # Cross-master subcategory name collision (§4.5).
+    # Cross-master subcategory name collision (section 4.5).
     target_normalized = normalize_category_name(sub.name)
     siblings = (await db.scalars(
         select(Category).where(
@@ -862,7 +862,7 @@ async def preview_move(
     subcategory_id: int,
     target_parent_id: int,
 ) -> CategoryMoveResult:
-    """Read-only move preview (§4.1).
+    """Read-only move preview (section 4.1).
 
     Issues SELECTs only. Does NOT write to ``categories``,
     ``audit_events``, or any dependent table. Does NOT emit structlog
@@ -960,7 +960,7 @@ async def batch_move_subcategories(
     request_id: Optional[str],
     ip_address: Optional[str],
 ) -> BatchMoveResult:
-    """Atomic batch move (§3.C).
+    """Atomic batch move (section 3.C).
 
     All moves succeed or none do. The transaction boundary is owned by
     ``async with db.begin():``; the service does NOT call
@@ -1017,7 +1017,7 @@ async def batch_move_subcategories(
     # to commit, nothing to roll back semantically.
     await db.rollback()
 
-    # Now write inside a single transaction boundary. Per spec §3.C, no
+    # Now write inside a single transaction boundary. Per spec 3.C, no
     # manual commit inside this block.
     async with db.begin():
         for sub_id, target_id in resolved_ids:
@@ -1055,8 +1055,8 @@ async def batch_move_subcategories(
                 "total_subcategories": len(per_move_results),
             },
         )
-        # No await db.commit() — db.begin() context manager owns the
-        # boundary per §3.C.
+        # No await db.commit(); db.begin() context manager owns the
+        # boundary per section 3.C.
 
     await logger.ainfo(
         "category.batch_moved",
@@ -1066,7 +1066,7 @@ async def batch_move_subcategories(
     return BatchMoveResult(moves=per_move_results)
 
 
-# ── Delete with migration (or without dependents) ───────────────────────────
+# --- Delete with migration (or without dependents) -------------------------
 
 
 def _check_target_compatibility_for_delete(
@@ -1076,7 +1076,7 @@ def _check_target_compatibility_for_delete(
     breakdown: _DependentBreakdown,
 ) -> None:
     """Validate the migration target's type against the source's
-    dependent-row breakdown (§4.6).
+    dependent-row breakdown (section 4.6).
 
     Raises ``ValidationError`` with a structured detail whose first
     token is ``type_mismatch::`` so the router can build the response
@@ -1145,13 +1145,13 @@ async def delete_category_with_migration(
     Order of guards (each fires before the next):
 
     1. Category must exist (404).
-    2. Master-with-children: 409 has_children (§4.7).
-    3. Last-in-type: 409 (§Invariant 4).
+    2. Master-with-children: 409 has_children (section 4.7).
+    3. Last-in-type: 409 (Invariant 4).
     4. Dependent row count drives the migration-target requirement:
        - has dependents AND no target: 422 migration_target_required.
        - has dependents AND target supplied: validate target exists,
          is in org, is not the source, is not a descendant; 400 on
-         failure. Then check type compatibility (§4.6).
+         failure. Then check type compatibility (section 4.6).
        - no dependents: target is ignored if supplied; falls through
          to 204.
     """
@@ -1163,7 +1163,7 @@ async def delete_category_with_migration(
     if cat is None:
         raise NotFoundError("Category")
 
-    # Master-with-children guard (§4.7) — fires BEFORE last-in-type and
+    # Master-with-children guard (section 4.7); fires BEFORE last-in-type and
     # BEFORE dependent-row check.
     if cat.parent_id is None:
         children = (await db.scalars(
@@ -1219,7 +1219,7 @@ async def delete_category_with_migration(
             "Migration target cannot be a descendant of the category being deleted."
         )
 
-    # Type compatibility (§4.6).
+    # Type compatibility (section 4.6).
     _check_target_compatibility_for_delete(
         source=cat, target=target, breakdown=breakdown,
     )
@@ -1260,7 +1260,7 @@ async def delete_category_with_migration(
         delete(CategoryRule).where(CategoryRule.category_id == cat.id)
     )
 
-    # Delete the source's Budget row, if any (§5: both delete paths
+    # Delete the source's Budget row, if any (section 5: both delete paths
     # delete the source's Budget row to avoid orphans).
     await db.execute(
         delete(Budget).where(

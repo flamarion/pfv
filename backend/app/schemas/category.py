@@ -30,7 +30,7 @@ class CategoryResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ── C0 move / batch-move / delete-with-migration schemas ────────────────────
+# --- C0 move / batch-move / delete-with-migration schemas ------------------
 
 
 class CategoryMoveRequest(BaseModel):

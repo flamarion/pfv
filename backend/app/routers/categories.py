@@ -68,7 +68,7 @@ def _to_response(cat: Category, parent_name: str | None, tx_count: int) -> Categ
     )
 
 
-# ── Domain-error mapping helpers ─────────────────────────────────────────────
+# --- Domain-error mapping helpers -------------------------------------------
 
 
 def _name_collision_response(detail_str: str) -> HTTPException:
@@ -169,7 +169,7 @@ def _migration_target_required_response(detail_str: str) -> HTTPException:
     )
 
 
-# ── Endpoints ────────────────────────────────────────────────────────────────
+# --- Endpoints --------------------------------------------------------------
 
 
 @router.get("", response_model=list[CategoryResponse])
@@ -367,7 +367,7 @@ async def update_category(
         cat.description = body.description
 
     # Audit rows staged before commit (one per logical change). Only
-    # emit when a value actually changed (per §D footer convention).
+    # emit when a value actually changed (per section D footer convention).
     org_name = await _actor_org_name(db, current_user.org_id)
     if rename_changed:
         audit_service.add_audit_event_to_session(
@@ -442,7 +442,7 @@ async def update_category(
     return _to_response(cat, parent_name, count_result or 0)
 
 
-# ── C0: move preview / move / batch-move / delete-with-migration ────────────
+# --- C0: move preview / move / batch-move / delete-with-migration ----------
 
 
 @router.get(
@@ -456,7 +456,7 @@ async def preview_move_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
     """Read-only move preview. Issues SELECTs only; no audit row, no
-    structlog event, no writes (§4.1 of the C0 spec)."""
+    structlog event, no writes (section 4.1 of the C0 spec)."""
     try:
         return await preview_move(
             db,
