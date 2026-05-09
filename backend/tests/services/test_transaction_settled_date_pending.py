@@ -210,3 +210,53 @@ async def test_update_settled_to_pending_with_explicit_settled_date_keeps_it(db_
     )
     assert result.status == TransactionStatus.PENDING
     assert result.settled_date == dt.date(2026, 6, 1)
+
+
+async def test_update_pending_clears_settled_date_via_explicit_null(db_session):
+    """Frontend's edit form clears the expected-settlement field by sending
+    settled_date=null. The service must distinguish this from "key omitted"
+    and actually wipe the persisted value (regression: prior code only
+    updated when ``body.settled_date is not None``, silently no-opping).
+    """
+    org, acct, cat = await _seed_org_with_account(db_session)
+    body = TransactionCreate(
+        account_id=acct.id, category_id=cat.id,
+        description="Pending CC", amount=Decimal("99.00"),
+        type="expense", status="pending",
+        date=dt.date(2026, 5, 1), settled_date=dt.date(2026, 6, 15),
+    )
+    tx = await transaction_service.create_transaction(db_session, org.id, body)
+    assert tx.settled_date == dt.date(2026, 6, 15)
+
+    # Caller supplies an explicit null. Pydantic v2 records it in
+    # model_fields_set so the service can tell this from a missing key.
+    update = TransactionUpdate.model_validate({"settled_date": None})
+    result = await transaction_service.update_transaction(
+        db_session, org.id, tx.id, update,
+    )
+    assert result.status == TransactionStatus.PENDING
+    assert result.settled_date is None
+
+
+async def test_update_pending_without_settled_date_key_preserves_value(db_session):
+    """A PUT body that omits ``settled_date`` entirely must NOT touch the
+    persisted value. This is the contrast case to the explicit-null test
+    above and is what protects unrelated edits (e.g. description-only)
+    from accidentally wiping the expected-settlement date.
+    """
+    org, acct, cat = await _seed_org_with_account(db_session)
+    body = TransactionCreate(
+        account_id=acct.id, category_id=cat.id,
+        description="Pending CC", amount=Decimal("99.00"),
+        type="expense", status="pending",
+        date=dt.date(2026, 5, 1), settled_date=dt.date(2026, 6, 15),
+    )
+    tx = await transaction_service.create_transaction(db_session, org.id, body)
+
+    # No settled_date key in the body.
+    update = TransactionUpdate.model_validate({"description": "Renamed"})
+    result = await transaction_service.update_transaction(
+        db_session, org.id, tx.id, update,
+    )
+    assert result.description == "Renamed"
+    assert result.settled_date == dt.date(2026, 6, 15)

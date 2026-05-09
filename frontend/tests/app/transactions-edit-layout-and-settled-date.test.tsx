@@ -418,6 +418,59 @@ describe("TransactionsPage — settled_date (Punch-list Item 13)", () => {
     expect(screen.queryByText(/expected settled/i)).toBeNull();
   });
 
+  it("edit form: clearing the expected-settlement input sends settled_date: null (not omitted)", async () => {
+    // Regression: the frontend used to send the field when set, but on clear
+    // the empty-string -> ?? -> undefined path made the JSON body OMIT the
+    // key. Combined with a backend that only updated on non-null, clearing
+    // was a silent no-op. The frontend now sends explicit null on clear so
+    // the backend can wipe the persisted value.
+    const tx = makeTx({
+      id: 95,
+      description: "Pending CC clearable",
+      status: "pending",
+      date: "2026-05-01",
+      settled_date: "2026-06-15",
+    });
+    setupApiFetch([tx]);
+    render(<TransactionsPage />);
+
+    await screen.findAllByText("Pending CC clearable");
+    await waitFor(() => {
+      expect(screen.queryAllByRole("button", { name: /^Edit:/ }).length).toBeGreaterThan(0);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: /^Edit:/ })[0]);
+
+    // Pre-fill confirms the wired-from-server path.
+    const expectedFields = await screen.findAllByLabelText(/Expected settlement/i);
+    expect((expectedFields[0] as HTMLInputElement).value).toBe("2026-06-15");
+
+    // Clear the field.
+    fireEvent.change(expectedFields[0], { target: { value: "" } });
+
+    fireEvent.click(screen.getAllByRole("button", { name: /^Save$/i })[0]);
+
+    const apiFetchMock = vi.mocked(apiFetch);
+    await waitFor(() => {
+      const put = apiFetchMock.mock.calls.find(
+        (c) =>
+          c[0] === "/api/v1/transactions/95" &&
+          (c[1] as RequestInit | undefined)?.method === "PUT",
+      );
+      expect(put).toBeTruthy();
+    });
+    const put = apiFetchMock.mock.calls.find(
+      (c) =>
+        c[0] === "/api/v1/transactions/95" &&
+        (c[1] as RequestInit | undefined)?.method === "PUT",
+    )!;
+    const body = JSON.parse((put[1] as RequestInit).body as string);
+    // The key MUST be present and explicitly null. Asserting "in" plus a
+    // strict-null check guards against a future regression where the
+    // frontend silently drops the key when the input is empty.
+    expect("settled_date" in body).toBe(true);
+    expect(body.settled_date).toBeNull();
+  });
+
   it("edit form: rejects settled_date earlier than transaction date inline", async () => {
     const tx = makeTx({
       id: 92,

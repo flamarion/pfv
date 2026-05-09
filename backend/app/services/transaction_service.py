@@ -469,20 +469,30 @@ async def update_transaction(
         # - SETTLED rows: settled_date is required (model + DB invariant).
         #   Use body.settled_date if provided, else stamp today on transition,
         #   else leave existing value alone.
-        # - PENDING rows: settled_date is now an "expected settlement date"
-        #   for forecast/period bucketing. Body.settled_date sets it; if the
-        #   caller transitions a settled row to pending without supplying a
-        #   settled_date we clear it to avoid leaking the historical actual.
+        # - PENDING rows: settled_date is an "expected settlement date" for
+        #   forecast/period bucketing. The caller can SET it (non-null), CLEAR
+        #   it (explicit null), or LEAVE it alone (key omitted from body). We
+        #   distinguish "explicit null" from "key omitted" via model_fields_set
+        #   because Pydantic v2 collapses both to attribute value None
+        #   otherwise. Without this, clearing the field via the edit form would
+        #   silently no-op against the persisted value.
+        settled_date_supplied = "settled_date" in body.model_fields_set
         if new_status == TransactionStatus.SETTLED:
+            # SETTLED rows must have a settled_date — clearing is illegal.
+            # An explicit null on transition gets the today fallback below.
             if body.settled_date is not None:
                 tx.settled_date = body.settled_date
             elif old_status != TransactionStatus.SETTLED:
                 tx.settled_date = datetime.date.today()
         else:
-            # Pending after this update.
-            if body.settled_date is not None:
+            # Pending after this update. Honor explicit null (clear) and
+            # explicit value (set); leave alone when the key is omitted.
+            if settled_date_supplied:
                 tx.settled_date = body.settled_date
             elif body.status is not None and old_status == TransactionStatus.SETTLED:
+                # Transitioning settled→pending without a supplied settled_date:
+                # clear the historical actual so it doesn't leak as an
+                # "expected" date for the now-pending row.
                 tx.settled_date = None
 
         # Validate date ordering after the partial update is applied. Use
