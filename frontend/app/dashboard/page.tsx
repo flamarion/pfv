@@ -22,6 +22,11 @@ import AccountMonthEndForecast, {
 } from "@/components/dashboard/AccountMonthEndForecast";
 import AccountTilesCard from "@/components/dashboard/AccountTile";
 import AddTransactionFab from "@/components/floating/AddTransactionFab";
+import {
+  SORT_KEY_DASHBOARD_SPENDING,
+  SORT_KEY_DASHBOARD_TRANSACTIONS,
+} from "@/lib/hooks/persisted-keys";
+import { usePersistedSort } from "@/lib/hooks/use-persisted-sort";
 import type { Account, BillingPeriod, Budget, Category, Transaction } from "@/lib/types";
 
 interface ForecastPlanItem {
@@ -156,8 +161,27 @@ export default function DashboardPage() {
   const [formTransferCatId, setFormTransferCatId] = useState<number | "">("");
 
   const [chartFilter, setChartFilter] = useState<string | null>(null);
-  const [dashSortField, setDashSortField] = useState<"date" | "description" | "amount">("date");
-  const [dashSortDir, setDashSortDir] = useState<"asc" | "desc">("desc");
+  // Item 6 (system-wide sort persistence): the dashboard transactions table
+  // and the Spending by Category card both persist their sort state via
+  // localStorage so a navigate-away-and-back lands the user where they were.
+  type DashTxSort = "date" | "description" | "amount";
+  const dashTxSort = usePersistedSort<DashTxSort>(
+    SORT_KEY_DASHBOARD_TRANSACTIONS,
+    "date",
+    "desc",
+    ["date", "description", "amount"] as const,
+  );
+  const dashSortField = dashTxSort.field;
+  const dashSortDir = dashTxSort.dir;
+  // Item 16 (D2 sortable columns on the Spending card): name | percent |
+  // amount. Default amount-desc to match the prior implicit ordering.
+  type SpendingSort = "name" | "percent" | "amount";
+  const spendingSort = usePersistedSort<SpendingSort>(
+    SORT_KEY_DASHBOARD_SPENDING,
+    "amount",
+    "desc",
+    ["name", "percent", "amount"] as const,
+  );
 
   // Selected period (navigate with arrows). On first paint before
   // loadRefs() finishes this is null — distinguish that from "we have a
@@ -493,9 +517,32 @@ export default function DashboardPage() {
       acc[tx.category_name] = (acc[tx.category_name] || 0) + Number(tx.amount);
       return acc;
     }, {});
-  const donutData = Object.entries(spendingByCategory)
+  // donutData drives both the donut chart (always rendered in amount-desc
+  // order so the largest slice starts at 12 o'clock) and the legend list
+  // (sortable by name | percent | amount, persisted via spendingSort).
+  const donutDataRaw = Object.entries(spendingByCategory)
     .map(([name, value]) => ({ name, value }))
     .sort((a, b) => b.value - a.value);
+  const donutData = donutDataRaw;
+  const totalSpend = donutDataRaw.reduce((s, d) => s + d.value, 0);
+  const sortedSpending = (() => {
+    const list = donutDataRaw.map((d) => ({
+      name: d.name,
+      value: d.value,
+      pct: totalSpend > 0 ? (d.value / totalSpend) * 100 : 0,
+      // Preserve original index so legend dots keep matching the donut's
+      // color order regardless of how the rows are sorted.
+      origIdx: donutDataRaw.indexOf(d),
+    }));
+    list.sort((a, b) => {
+      let cmp = 0;
+      if (spendingSort.field === "name") cmp = a.name.localeCompare(b.name);
+      else if (spendingSort.field === "percent") cmp = a.pct - b.pct;
+      else cmp = a.value - b.value;
+      return spendingSort.dir === "asc" ? cmp : -cmp;
+    });
+    return list;
+  })();
 
   // When chart filter is active, show from allTransactions; otherwise paginated
   const txSource = chartFilter ? allTransactions : transactions;
@@ -508,9 +555,24 @@ export default function DashboardPage() {
   const visibleTxs = txSource.filter((tx) => !hiddenIds.has(tx.id));
 
 
-  function toggleDashSort(field: typeof dashSortField) {
-    if (dashSortField === field) setDashSortDir(dashSortDir === "asc" ? "desc" : "asc");
-    else { setDashSortField(field); setDashSortDir(field === "date" ? "desc" : "asc"); }
+  function toggleDashSort(field: DashTxSort) {
+    if (dashSortField === field) {
+      dashTxSort.setSort(field, dashSortDir === "asc" ? "desc" : "asc");
+    } else {
+      dashTxSort.setSort(field, field === "date" ? "desc" : "asc");
+    }
+  }
+  // Spending card: same toggle pattern. Numeric defaults flip to desc, name
+  // defaults to asc (alphabetical) on first click.
+  function toggleSpendingSort(field: SpendingSort) {
+    if (spendingSort.field === field) {
+      spendingSort.setSort(
+        field,
+        spendingSort.dir === "asc" ? "desc" : "asc",
+      );
+    } else {
+      spendingSort.setSort(field, field === "name" ? "asc" : "desc");
+    }
   }
 
   // Sort + filter the visible transactions
@@ -793,23 +855,48 @@ export default function DashboardPage() {
                       both numeric columns keeps digits aligned across
                       rows. */}
                   <div className="w-full space-y-1.5 sm:flex-1">
-                    {(() => {
-                      const totalSpend = donutData.reduce((s, d) => s + d.value, 0);
-                      return donutData.slice(0, 10).map((d, i) => {
-                        const pct = totalSpend > 0 ? (d.value / totalSpend) * 100 : 0;
-                        return (
-                          <button key={d.name} onClick={() => setChartFilter(chartFilter === d.name ? null : d.name)}
-                            className={`grid w-full grid-cols-[auto_minmax(0,1fr)_3rem_auto] items-center gap-2 rounded px-1.5 py-0.5 transition-colors hover:bg-surface-raised ${chartFilter === d.name ? "bg-surface-overlay" : ""}`}>
-                            <div className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: CHART_COLORS[i % CHART_COLORS.length] }} />
-                            <span className="min-w-0 truncate text-left text-xs text-text-secondary">{d.name}</span>
-                            <span className="text-right text-[10px] tabular-nums text-text-muted">{pct.toFixed(0)}%</span>
-                            <span className="text-right text-xs tabular-nums text-text-muted">{formatAmount(d.value)}</span>
-                          </button>
-                        );
-                      });
-                    })()}
-                    {donutData.length > 10 && (
-                      <p className="px-1.5 text-[10px] text-text-muted">+{donutData.length - 10} more (click chart to filter)</p>
+                    {/* Item 16 (D2): sortable column headers — Category,
+                        %, Amount. Persists via usePersistedSort. The
+                        leading "auto" column is the legend dot, which
+                        has no header. */}
+                    <div className="grid w-full grid-cols-[auto_minmax(0,1fr)_3rem_auto] items-center gap-2 px-1.5 pb-1 text-[10px] uppercase tracking-wider text-text-muted">
+                      <span aria-hidden="true" className="h-2.5 w-2.5" />
+                      <button
+                        type="button"
+                        onClick={() => toggleSpendingSort("name")}
+                        className="text-left min-h-[32px] hover:text-text-primary"
+                        aria-label="Sort by category"
+                      >
+                        Category{spendingSort.field === "name" ? (spendingSort.dir === "asc" ? " ↑" : " ↓") : ""}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => toggleSpendingSort("percent")}
+                        className="text-right min-h-[32px] hover:text-text-primary"
+                        aria-label="Sort by percent of total"
+                      >
+                        %{spendingSort.field === "percent" ? (spendingSort.dir === "asc" ? " ↑" : " ↓") : ""}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => toggleSpendingSort("amount")}
+                        className="text-right min-h-[32px] hover:text-text-primary"
+                        aria-label="Sort by amount"
+                      >
+                        Amount{spendingSort.field === "amount" ? (spendingSort.dir === "asc" ? " ↑" : " ↓") : ""}
+                      </button>
+                    </div>
+                    {sortedSpending.slice(0, 10).map((d) => (
+                      <button key={d.name} onClick={() => setChartFilter(chartFilter === d.name ? null : d.name)}
+                        className={`grid w-full grid-cols-[auto_minmax(0,1fr)_3rem_auto] items-center gap-2 rounded px-1.5 py-0.5 transition-colors hover:bg-surface-raised ${chartFilter === d.name ? "bg-surface-overlay" : ""}`}>
+                        <div className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: CHART_COLORS[d.origIdx % CHART_COLORS.length] }} />
+                        <span className="min-w-0 truncate text-left text-xs text-text-secondary">{d.name}</span>
+                        <span className="text-right text-[10px] tabular-nums text-text-muted">{d.pct.toFixed(0)}%</span>
+                        <span className="text-right text-xs tabular-nums text-text-muted">{formatAmount(d.value)}</span>
+                      </button>
+                    ))}
+                    {sortedSpending.length > 10 && (
+                      <p className="px-1.5 text-[10px] text-text-muted">+{sortedSpending.length - 10} more (click chart to filter)</p>
                     )}
                   </div>
                 </div>

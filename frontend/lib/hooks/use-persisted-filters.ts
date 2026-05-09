@@ -73,6 +73,9 @@ export function usePersistedFilters<T extends Record<string, unknown>>(
 
   const set = useCallback(
     (patch: Partial<T>) => {
+      // Compute next from latest in the updater to coalesce back-to-back
+      // calls correctly. Persistence runs as a side-effect of the updater;
+      // the write is idempotent so a strict-mode double-invoke is harmless.
       setFilters((prev) => {
         const next = { ...prev, ...patch } as T;
         writePersisted(key, next);
