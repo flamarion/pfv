@@ -5,10 +5,10 @@ matching the project's existing router/service pattern.
 
 Audit events written here:
 
-- ``tag.created`` — POST /api/v1/tags
-- ``tag.renamed`` — PATCH /api/v1/tags/{id}
-- ``tag.deleted`` — DELETE /api/v1/tags/{id}
-- ``transaction.tags.replaced`` — PUT /api/v1/transactions/{id}/tags
+- ``tag.created`` for POST /api/v1/tags
+- ``tag.renamed`` for PATCH /api/v1/tags/{id}
+- ``tag.deleted`` for DELETE /api/v1/tags/{id}
+- ``transaction.tags.replaced`` for PUT /api/v1/transactions/{id}/tags
 
 The merge endpoint and ``tag.merged`` audit event are out of scope for
 PR-Tags-A (the spec lists merge under PR-Tags-C as a management UI
@@ -211,7 +211,7 @@ async def suggest_endpoint(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Three-pass autocomplete (org_co_category → org_recent → shared_dictionary).
+    """Three-pass autocomplete (org_co_category -> org_recent -> shared_dictionary).
 
     The shared_dictionary pass is skipped unless the org has
     ``share_tag_data=true`` AND each candidate tag passes the

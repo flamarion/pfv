@@ -3,7 +3,7 @@
 Public API surface mirrors ``app/schemas/category.py`` style: thin
 request/response models, Decimal/date types pass through, no DB-layer
 concerns. The suggestion endpoint's response shape is the most
-load-bearing piece — the frontend autocomplete reads ``source`` to
+load-bearing piece: the frontend autocomplete reads ``source`` to
 decide whether to render a subtle differentiator.
 """
 from __future__ import annotations
