@@ -1,7 +1,7 @@
 """Tags + cross-org tag dictionary (PR-Tags-A).
 
-Revision ID: 037_tags_and_dictionary
-Revises: 036_settled_implies_settled_date
+Revision ID: 038_tags_and_dictionary
+Revises: 037_categories_floor_backfill
 Create Date: 2026-05-09
 
 Implements the schema half of the Tags + Auto-learning discovery spec
@@ -70,8 +70,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision = "037_tags_and_dictionary"
-down_revision = "036_settled_implies_settled_date"
+revision = "038_tags_and_dictionary"
+down_revision = "037_categories_floor_backfill"
 branch_labels = None
 depends_on = None
 
