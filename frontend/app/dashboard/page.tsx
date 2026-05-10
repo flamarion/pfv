@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { ChevronDown, ChevronUp, ChevronsUpDown } from "lucide-react";
 import AppShell from "@/components/AppShell";
 import Spinner from "@/components/ui/Spinner";
 import { useAuth } from "@/components/auth/AuthProvider";
@@ -855,36 +856,118 @@ export default function DashboardPage() {
                       both numeric columns keeps digits aligned across
                       rows. */}
                   <div className="w-full space-y-1.5 sm:flex-1">
-                    {/* Item 16 (D2): sortable column headers — Category,
-                        %, Amount. Persists via usePersistedSort. The
-                        leading "auto" column is the legend dot, which
-                        has no header. */}
-                    <div className="grid w-full grid-cols-[auto_minmax(0,1fr)_3rem_auto] items-center gap-2 px-1.5 pb-1 text-[10px] uppercase tracking-wider text-text-muted">
+                    {/* Item 16 (D2): sortable column headers for Category,
+                        %, Amount. Persists via usePersistedSort. The leading
+                        "auto" column is the legend dot, which has no header.
+                        Each header carries an aria-sort state and a lucide
+                        chevron icon, with a brass focus ring matching the
+                        Pressable-Surfaces Rule in DESIGN.md. */}
+                    <div
+                      role="row"
+                      className="grid w-full grid-cols-[auto_minmax(0,1fr)_3rem_auto] items-center gap-2 px-1.5 pb-1 text-[10px] uppercase tracking-wider text-text-muted"
+                    >
                       <span aria-hidden="true" className="h-2.5 w-2.5" />
-                      <button
-                        type="button"
-                        onClick={() => toggleSpendingSort("name")}
-                        className="text-left min-h-[32px] hover:text-text-primary"
-                        aria-label="Sort by category"
+                      <div
+                        role="columnheader"
+                        aria-sort={
+                          spendingSort.field === "name"
+                            ? spendingSort.dir === "asc"
+                              ? "ascending"
+                              : "descending"
+                            : "none"
+                        }
                       >
-                        Category{spendingSort.field === "name" ? (spendingSort.dir === "asc" ? " ↑" : " ↓") : ""}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => toggleSpendingSort("percent")}
-                        className="text-right min-h-[32px] hover:text-text-primary"
-                        aria-label="Sort by percent of total"
+                        <button
+                          type="button"
+                          onClick={() => toggleSpendingSort("name")}
+                          className="inline-flex items-center gap-1 text-left min-h-[32px] hover:text-text-primary rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+                          aria-label="Sort by category"
+                        >
+                          <span>Category</span>
+                          {spendingSort.field === "name" ? (
+                            spendingSort.dir === "asc" ? (
+                              <ChevronUp className="h-3 w-3" aria-hidden="true" />
+                            ) : (
+                              <ChevronDown className="h-3 w-3" aria-hidden="true" />
+                            )
+                          ) : (
+                            <ChevronsUpDown className="h-3 w-3 text-text-muted/60" aria-hidden="true" />
+                          )}
+                          <span className="sr-only">
+                            {spendingSort.field === "name"
+                              ? `sorted ${spendingSort.dir === "asc" ? "ascending" : "descending"}`
+                              : "click to sort"}
+                          </span>
+                        </button>
+                      </div>
+                      <div
+                        role="columnheader"
+                        aria-sort={
+                          spendingSort.field === "percent"
+                            ? spendingSort.dir === "asc"
+                              ? "ascending"
+                              : "descending"
+                            : "none"
+                        }
+                        className="text-right"
                       >
-                        %{spendingSort.field === "percent" ? (spendingSort.dir === "asc" ? " ↑" : " ↓") : ""}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => toggleSpendingSort("amount")}
-                        className="text-right min-h-[32px] hover:text-text-primary"
-                        aria-label="Sort by amount"
+                        <button
+                          type="button"
+                          onClick={() => toggleSpendingSort("percent")}
+                          className="inline-flex items-center gap-1 justify-end min-h-[32px] hover:text-text-primary rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+                          aria-label="Sort by percent of total"
+                        >
+                          <span>%</span>
+                          {spendingSort.field === "percent" ? (
+                            spendingSort.dir === "asc" ? (
+                              <ChevronUp className="h-3 w-3" aria-hidden="true" />
+                            ) : (
+                              <ChevronDown className="h-3 w-3" aria-hidden="true" />
+                            )
+                          ) : (
+                            <ChevronsUpDown className="h-3 w-3 text-text-muted/60" aria-hidden="true" />
+                          )}
+                          <span className="sr-only">
+                            {spendingSort.field === "percent"
+                              ? `sorted ${spendingSort.dir === "asc" ? "ascending" : "descending"}`
+                              : "click to sort"}
+                          </span>
+                        </button>
+                      </div>
+                      <div
+                        role="columnheader"
+                        aria-sort={
+                          spendingSort.field === "amount"
+                            ? spendingSort.dir === "asc"
+                              ? "ascending"
+                              : "descending"
+                            : "none"
+                        }
+                        className="text-right"
                       >
-                        Amount{spendingSort.field === "amount" ? (spendingSort.dir === "asc" ? " ↑" : " ↓") : ""}
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => toggleSpendingSort("amount")}
+                          className="inline-flex items-center gap-1 justify-end min-h-[32px] hover:text-text-primary rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+                          aria-label="Sort by amount"
+                        >
+                          <span>Amount</span>
+                          {spendingSort.field === "amount" ? (
+                            spendingSort.dir === "asc" ? (
+                              <ChevronUp className="h-3 w-3" aria-hidden="true" />
+                            ) : (
+                              <ChevronDown className="h-3 w-3" aria-hidden="true" />
+                            )
+                          ) : (
+                            <ChevronsUpDown className="h-3 w-3 text-text-muted/60" aria-hidden="true" />
+                          )}
+                          <span className="sr-only">
+                            {spendingSort.field === "amount"
+                              ? `sorted ${spendingSort.dir === "asc" ? "ascending" : "descending"}`
+                              : "click to sort"}
+                          </span>
+                        </button>
+                      </div>
                     </div>
                     {sortedSpending.slice(0, 10).map((d) => (
                       <button key={d.name} onClick={() => setChartFilter(chartFilter === d.name ? null : d.name)}

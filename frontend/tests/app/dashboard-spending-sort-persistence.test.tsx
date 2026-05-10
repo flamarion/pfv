@@ -125,7 +125,7 @@ async function awaitSpendingHeaders() {
   });
 }
 
-describe("DashboardPage — Spending by Category sort persistence (item 16)", () => {
+describe("DashboardPage - Spending by Category sort persistence (item 16)", () => {
   const useAuthMock = vi.mocked(useAuth);
 
   beforeEach(() => {
@@ -177,11 +177,16 @@ describe("DashboardPage — Spending by Category sort persistence (item 16)", ()
     await awaitSpendingHeaders();
 
     const catBtn = screen.getByRole("button", { name: /Sort by category/i });
+    const catHeader = catBtn.closest('[role="columnheader"]') as HTMLElement;
     fireEvent.click(catBtn);
-    await waitFor(() => expect(catBtn.textContent).toMatch(/↑/));
+    await waitFor(() =>
+      expect(catHeader.getAttribute("aria-sort")).toBe("ascending"),
+    );
 
     fireEvent.click(catBtn);
-    await waitFor(() => expect(catBtn.textContent).toMatch(/↓/));
+    await waitFor(() =>
+      expect(catHeader.getAttribute("aria-sort")).toBe("descending"),
+    );
 
     const stored = JSON.parse(
       window.localStorage.getItem(SORT_KEY_DASHBOARD_SPENDING)!,
@@ -199,10 +204,25 @@ describe("DashboardPage — Spending by Category sort persistence (item 16)", ()
     await awaitSpendingHeaders();
 
     const pctBtn = screen.getByRole("button", { name: /Sort by percent of total/i });
-    expect(pctBtn.textContent).toMatch(/↑/);
-    // Other columns should not show an arrow.
-    expect(
-      screen.getByRole("button", { name: /Sort by category/i }).textContent,
-    ).not.toMatch(/↑|↓/);
+    const pctHeader = pctBtn.closest('[role="columnheader"]') as HTMLElement;
+    expect(pctHeader.getAttribute("aria-sort")).toBe("ascending");
+    // Other columns should report aria-sort="none".
+    const catBtn = screen.getByRole("button", { name: /Sort by category/i });
+    const catHeader = catBtn.closest('[role="columnheader"]') as HTMLElement;
+    expect(catHeader.getAttribute("aria-sort")).toBe("none");
+  });
+
+  it("renders a lucide chevron icon for the active spending sort column", async () => {
+    setupApiFetch();
+    render(<DashboardPage />);
+    await awaitSpendingHeaders();
+
+    // Default is amount-desc, so the Amount header should carry aria-sort="descending"
+    // and render the down chevron (ChevronDown). Other columns render the
+    // ChevronsUpDown unsorted indicator.
+    const amtBtn = screen.getByRole("button", { name: /Sort by amount/i });
+    const amtHeader = amtBtn.closest('[role="columnheader"]') as HTMLElement;
+    expect(amtHeader.getAttribute("aria-sort")).toBe("descending");
+    expect(amtBtn.querySelector("svg")).not.toBeNull();
   });
 });
