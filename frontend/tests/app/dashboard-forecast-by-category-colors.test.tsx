@@ -29,7 +29,7 @@ vi.mock("next/navigation", () => ({
 // Lightweight recharts mock that renders <Bar> children so <Cell> elements
 // land in the DOM with their fill attribute. The dashboard's Forecast by
 // Category bar passes a list of Cell children whose fills encode the
-// over/under-plan classification — that's what this test asserts.
+// over/under-plan classification, that's what this test asserts.
 vi.mock("recharts", () => {
   return {
     ResponsiveContainer: ({ children }: { children: React.ReactNode }) => (
@@ -84,8 +84,8 @@ const USER = {
 };
 
 // Plan with two expense lines:
-// - Housing: planned 20.00, actual 39.50 (OVER plan, +19.50) → red Cell
-// - Groceries: planned 500.00, actual 200.00 (UNDER plan) → green Cell
+// - Housing: planned 20.00, actual 39.50 (OVER plan, +19.50) -> red Cell
+// - Groceries: planned 500.00, actual 200.00 (UNDER plan) -> green Cell
 // Mirrors the user-reported repro on 2026-05-10.
 const PLAN_OVER_AND_UNDER = {
   id: 1,
@@ -150,7 +150,7 @@ function setupApiMocks() {
   }) as never);
 }
 
-describe("DashboardPage — Forecast by Category over/under-plan colors", () => {
+describe("DashboardPage - Forecast by Category over/under-plan colors", () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
     window.history.pushState({}, "", "/dashboard");
@@ -192,9 +192,9 @@ describe("DashboardPage — Forecast by Category over/under-plan colors", () => 
 
     // Order in the chart data follows the order of expenseItems passed
     // into the chart, which mirrors plan.items: Housing then Groceries.
-    // Housing: actual 39.50 > planned 20 → over (red, var(--color-danger))
+    // Housing: actual 39.50 > planned 20 -> over (red, var(--color-danger))
     expect(cells[0].getAttribute("data-fill")).toBe("var(--color-danger)");
-    // Groceries: actual 200 < planned 500 → under (green, var(--color-success))
+    // Groceries: actual 200 < planned 500 -> under (green, var(--color-success))
     expect(cells[1].getAttribute("data-fill")).toBe("var(--color-success)");
   });
 

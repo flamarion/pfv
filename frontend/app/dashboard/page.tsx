@@ -892,7 +892,7 @@ export default function DashboardPage() {
                 const expenseItems = forecast?.items.filter((it) => it.type === "expense") ?? [];
                 if (forecast && expenseItems.length > 0) {
                   const chartRows = expenseItems.slice(0, 8).map((it) => ({
-                    name: it.category_name.length > 12 ? it.category_name.slice(0, 12) + "…" : it.category_name,
+                    name: it.category_name.length > 12 ? it.category_name.slice(0, 12) + "..." : it.category_name,
                     planned: Number(it.planned_amount),
                     actual: Number(it.actual_amount),
                   }));
