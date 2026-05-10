@@ -1,3 +1,4 @@
+import os
 import subprocess
 from contextlib import asynccontextmanager
 
@@ -92,46 +93,96 @@ async def _resolve_alembic_current() -> str:
         return "unknown"
 
 
-def _resolve_git_branch() -> str:
-    """Best-effort current git branch for diagnostic logging.
+_GIT_HEAD_PATH = "/app/.git/HEAD"
 
-    The dev container is bind-mounted from the host worktree, so
-    /app/.git resolves to the user's checkout. Falls back to "unknown"
-    if git isn't available or the repo can't be read.
+
+def _detect_branch() -> str | None:
+    """Read the current branch directly from /app/.git/HEAD.
+
+    docker-compose mounts the host repo's .git directory read-only into
+    /app/.git, so this is a file read with no subprocess and no git
+    binary required in the container. Returns:
+
+      * the branch name, when HEAD is a symbolic ref (the normal case)
+      * None, when HEAD is detached (a raw SHA), the file is missing,
+        or anything else goes wrong (worktree gitdir indirection,
+        permissions, etc.)
+
+    Callers MUST treat None as "couldn't tell" — the lifespan guard
+    refuses to migrate in that case so we fail closed, not open.
     """
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip() or "unknown"
-    except Exception:
-        pass
-    return "unknown"
+        with open(_GIT_HEAD_PATH) as f:
+            head = f.read().strip()
+    except (OSError, ValueError):
+        return None
+    prefix = "ref: refs/heads/"
+    if head.startswith(prefix):
+        return head[len(prefix):] or None
+    return None
+
+
+def _resolve_git_branch() -> str:
+    """String-returning wrapper around `_detect_branch()` for diagnostic
+    logging. Returns "unknown" rather than None so structured log fields
+    stay typed.
+    """
+    return _detect_branch() or "unknown"
+
+
+def _migrate_off_main_override_set() -> bool:
+    """True when the operator has opted in to lifespan migrations from
+    a non-main checkout. Mirrors the CLI guard in `./pfv migrate` — same
+    env var name on purpose so a single export covers both surfaces.
+    """
+    return os.environ.get("PFV_MIGRATE_OK_OFF_MAIN", "").strip() == "1"
 
 
 async def _run_migrations() -> None:
     """Run Alembic migrations on startup. Idempotent — alembic upgrade head
     is a no-op when already at the latest revision.
 
+    Refuses to run when the host checkout is on a non-main branch unless
+    `PFV_MIGRATE_OK_OFF_MAIN=1` is set. A migrate from a feature branch
+    can leave alembic_version pointing at a revision that only exists on
+    that branch, which then breaks the next `./pfv start` on main until
+    the version row is hand-patched. Same drift class the 2026-05-09
+    incident demonstrated. Detached HEAD / unreadable HEAD also refuses
+    (fail closed). See
+    ~/.claude/projects/-Users-fjorge-src-pfv/memory/reference_shared_mysql_volume_trap.md.
+
     Logs the resolved head + current revision (and best-effort git branch)
     before invoking alembic so the next drift incident has a breadcrumb
     pointing at exactly which revision the lifespan was targeting. Skips
     the subprocess entirely when current == head.
     """
+    branch = _detect_branch()
+    if branch != "main" and not _migrate_off_main_override_set():
+        logger.error(
+            "migrate.dev.refused",
+            branch=branch if branch is not None else "unknown",
+            reason=(
+                "branch_not_main" if branch is not None else "branch_undetectable"
+            ),
+            override_env_var="PFV_MIGRATE_OK_OFF_MAIN",
+        )
+        raise RuntimeError(
+            "Refusing to run dev lifespan migrations from non-main branch "
+            f"({'detached/unknown' if branch is None else branch!r}). "
+            "Set PFV_MIGRATE_OK_OFF_MAIN=1 in .env or the shell to override. "
+            "See reference_shared_mysql_volume_trap.md."
+        )
+
     head = _resolve_alembic_head()
     current = await _resolve_alembic_current()
-    branch = _resolve_git_branch()
+    branch_for_log = branch or "unknown"
 
     if current == head and head != "unknown":
         logger.info(
             "migrate.dev.no_op",
             current_revision=current,
             head_revision=head,
-            branch=branch,
+            branch=branch_for_log,
         )
         return
 
@@ -139,7 +190,7 @@ async def _run_migrations() -> None:
         "migrate.dev.target",
         current_revision=current,
         head_revision=head,
-        branch=branch,
+        branch=branch_for_log,
     )
 
     result = subprocess.run(

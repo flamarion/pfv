@@ -74,6 +74,17 @@ for the 2026-05-09 incident this rule prevents.
 `./pfv migrate` is for the user's local stack only. Do not invoke it from an
 agent session; it has no `-p` flag and always targets the default project.
 
+### Lifespan migration branch guard
+
+`./pfv start`, `./pfv restart`, and `./pfv rebuild` boot the backend, whose
+FastAPI lifespan calls `_run_migrations()` against the shared MySQL volume in
+dev. To prevent the same drift class `./pfv migrate`'s CLI guard catches, the
+lifespan reads `/app/.git/HEAD` and refuses to migrate when the host checkout
+is on a non-main branch (or is detached / unreadable). If you genuinely need
+to run lifespan migrations from a feature branch in dev, set
+`PFV_MIGRATE_OK_OFF_MAIN=1` in `.env` or the shell. Default is to refuse,
+since the same env var name pairs with `./pfv migrate`'s CLI guard.
+
 ## Seeding
 
 For a repeatable local dataset (accounts, transactions, budgets, recurring templates), run `./pfv seed`. See the Seeding Mock Data section of CONTRIBUTING.md for the full workflow and the `SEED_*` environment variables that let you customize the seeded user.
