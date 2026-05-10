@@ -70,7 +70,7 @@ export default function CategoriesPage() {
   const [refreshError, setRefreshError] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  // ── C2 UI: Edit-mode + batch select (C2a + C2c) ──────────────────────────
+  // -- C2 UI: Edit-mode + batch select (C2a + C2c) --------------------------
   // C2a: page-level Edit toggle. C2c: batch select for move/delete.
   // Selection is subcategory-only by design (C0 spec section 4.7: master
   // delete with children returns 409, so master rows do not participate in
@@ -93,7 +93,7 @@ export default function CategoriesPage() {
     );
   }, []);
 
-  // Esc exits Edit mode (only when no modal is open — modals own their own Esc).
+  // Esc exits Edit mode (only when no modal is open; modals own their own Esc).
   useEffect(() => {
     if (!editMode) return;
     const handler = (e: KeyboardEvent) => {
@@ -105,7 +105,7 @@ export default function CategoriesPage() {
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [editMode, batchMoveOpen, batchDeleteOpen, confirmDeleteId, editingCatId, addingToMaster, exitEditMode]);
-  // ── /C2 UI ──────────────────────────────────────────────────────────────
+  // -- /C2 UI ---------------------------------------------------------------
 
   const reload = useCallback(async () => {
     const data = await apiFetch<Category[]>("/api/v1/categories");
