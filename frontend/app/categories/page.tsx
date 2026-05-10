@@ -403,9 +403,14 @@ export default function CategoriesPage() {
         categories={categories}
         onCancel={() => setBatchMoveOpen(false)}
         onSuccess={async () => {
+          // Reload FIRST so a refresh failure surfaces inside the modal's
+          // batch-move-refresh-error banner (the modal awaits this promise
+          // and re-throws). Closing the modal before awaiting reload would
+          // unmount the banner before it could ever render. Mirrors the
+          // finishWithMaster pattern from AddMasterWithSubsModal in PR #192.
+          await reload();
           setBatchMoveOpen(false);
           exitEditMode();
-          await reload();
         }}
       />
       <BatchDeleteModal
@@ -418,6 +423,11 @@ export default function CategoriesPage() {
           void reload();
         }}
         onSuccess={async (failures) => {
+          // Reload FIRST. If reload throws, the modal stays open and shows
+          // its batch-delete-refresh-error banner. State changes that
+          // depend on a successful reload (closing the modal, exiting edit
+          // mode, dropping succeeded ids) only happen after reload resolves.
+          await reload();
           if (failures.length === 0) {
             setBatchDeleteOpen(false);
             exitEditMode();
@@ -426,7 +436,6 @@ export default function CategoriesPage() {
             const failedIds = new Set(failures.map((f) => f.category_id));
             setSelectedIds((prev) => prev.filter((id) => failedIds.has(id)));
           }
-          await reload();
         }}
       />
     </AppShell>

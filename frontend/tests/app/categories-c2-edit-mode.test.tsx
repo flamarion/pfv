@@ -351,6 +351,61 @@ describe("CategoriesPage -C2 batch move", () => {
     expect(err.textContent).toContain("Entertainment");
     expect(screen.getByTestId("batch-move-modal")).toBeInTheDocument();
   });
+
+  it("if the post-mutation reload fails, modal stays open and surfaces the refresh-error banner", async () => {
+    // Reload-before-close ordering: page must await reload() before
+    // closing the modal, so a failure can surface inside the modal.
+    // The reload-after-mutation throw is gated on the batch-move POST
+    // having already fired, not on a call counter, because StrictMode
+    // double-renders inflate the GET count during initial mount.
+    let batchMovePosted = false;
+    setupApi({
+      "/api/v1/categories/101/move/preview": () => ({
+        category_id: 101,
+        source_master_id: 100,
+        target_master_id: 200,
+        affected_transaction_count: 5,
+        affected_recurring_count: 0,
+        affected_forecast_item_count: 0,
+        budget_actuals_shifted: false,
+      }),
+      "/api/v1/categories/batch-move": () => {
+        batchMovePosted = true;
+        return { moves: [] };
+      },
+    });
+
+    const originalImpl = vi.mocked(apiFetch).getMockImplementation();
+    vi.mocked(apiFetch).mockImplementation(((url: string, init?: RequestInit) => {
+      if (
+        batchMovePosted
+        && url === "/api/v1/categories"
+        && (!init || init.method === undefined)
+      ) {
+        return Promise.reject(new Error("network blip"));
+      }
+      return originalImpl ? originalImpl(url, init) : Promise.resolve({});
+    }) as never);
+
+    render(<CategoriesPage />);
+    await waitFor(() => expect(screen.getByText("Restaurants")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("categories-edit-toggle"));
+    fireEvent.click(screen.getByTestId("sub-checkbox-101"));
+    fireEvent.click(screen.getByTestId("batch-move-button"));
+
+    fireEvent.click(await screen.findByTestId("batch-move-target-200"));
+    await waitFor(() => {
+      expect(screen.getByTestId("batch-move-preview")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("batch-move-confirm"));
+
+    // Modal MUST stay open and show the inline refresh-error banner.
+    const banner = await screen.findByTestId("batch-move-refresh-error");
+    expect(banner.textContent).toMatch(/network blip/i);
+    expect(screen.getByTestId("batch-move-modal")).toBeInTheDocument();
+  });
 });
 
 describe("CategoriesPage -C2 batch delete", () => {
@@ -427,5 +482,46 @@ describe("CategoriesPage -C2 batch delete", () => {
     // Modal still open, showing failure row only (101 succeeded and was dropped).
     expect(screen.queryByTestId("batch-delete-row-101")).not.toBeInTheDocument();
     expect(screen.getByTestId("batch-delete-row-102")).toBeInTheDocument();
+  });
+
+  it("if the post-mutation reload fails after a fully successful delete, modal stays open and surfaces the refresh-error banner", async () => {
+    // Reload-before-close ordering: page must await reload() before
+    // closing the modal so the failure can surface to the user.
+    let deletePosted = false;
+    setupApi({
+      "/api/v1/categories/102?target_category_id=200": (init) => {
+        if (init?.method === "DELETE") {
+          deletePosted = true;
+        }
+        return undefined;
+      },
+    });
+    const originalImpl = vi.mocked(apiFetch).getMockImplementation();
+    vi.mocked(apiFetch).mockImplementation(((url: string, init?: RequestInit) => {
+      if (
+        deletePosted
+        && url === "/api/v1/categories"
+        && (!init || init.method === undefined)
+      ) {
+        return Promise.reject(new Error("reload failed"));
+      }
+      return originalImpl ? originalImpl(url, init) : Promise.resolve({});
+    }) as never);
+
+    render(<CategoriesPage />);
+    await waitFor(() => expect(screen.getByText("Restaurants")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("categories-edit-toggle"));
+    fireEvent.click(screen.getByTestId("sub-checkbox-102"));
+    fireEvent.click(screen.getByTestId("batch-delete-button"));
+
+    const target102 = await screen.findByTestId("batch-delete-target-102");
+    fireEvent.change(target102, { target: { value: "200" } });
+
+    fireEvent.click(screen.getByTestId("batch-delete-confirm"));
+
+    const banner = await screen.findByTestId("batch-delete-refresh-error");
+    expect(banner.textContent).toMatch(/reload failed/i);
+    expect(screen.getByTestId("batch-delete-modal")).toBeInTheDocument();
   });
 });
