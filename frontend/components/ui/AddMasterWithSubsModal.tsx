@@ -235,7 +235,7 @@ export default function AddMasterWithSubsModal({
   }
 
   // Phase 1: create master. Phase 2: atomic batch-move of all selected
-  // subs in a single backend call (all-or-nothing per C0 §3.C).
+  // subs in a single backend call (all-or-nothing per C0 section 3.C).
   async function runCreate(subIds: number[]) {
     setSubmitting(true);
     setErrorText(null);
@@ -518,15 +518,17 @@ export default function AddMasterWithSubsModal({
         </form>
       </div>
 
-      <ConfirmModal
-        open={confirmOpen}
-        title={`Create "${trimmedName || "master"}" and move ${selectedSubIds.size} subcategor${selectedSubIds.size === 1 ? "y" : "ies"}?`}
-        message={confirmMessage}
-        confirmLabel="Yes, create and move"
-        cancelLabel="Cancel"
-        onConfirm={handleConfirmYes}
-        onCancel={() => setConfirmOpen(false)}
-      />
+      {confirmOpen && (
+        <ConfirmModal
+          open={confirmOpen}
+          title={`Create "${trimmedName || "master"}" and move ${selectedSubIds.size} subcategor${selectedSubIds.size === 1 ? "y" : "ies"}?`}
+          message={confirmMessage}
+          confirmLabel="Yes, create and move"
+          cancelLabel="Cancel"
+          onConfirm={handleConfirmYes}
+          onCancel={() => setConfirmOpen(false)}
+        />
+      )}
     </div>
   );
 
