@@ -417,8 +417,24 @@ async def _get_or_create_dictionary_row(
     Tag row) survives. After IntegrityError we re-SELECT to pick up the
     row the racing transaction committed.
 
+    The retry SELECT uses ``with_for_update`` (FOR UPDATE) because under
+    InnoDB's default REPEATABLE READ isolation a plain SELECT reads the
+    snapshot established at transaction start, which does NOT see the
+    row the racing transaction just committed. That would make
+    ``scalar_one()`` raise ``NoResultFound`` and the user's local Tag
+    would still get rolled back, defeating the savepoint. A locking
+    read forces InnoDB to acquire a record lock against the secondary
+    index and read the latest committed version, so the row is
+    guaranteed visible. The lock is released at outer commit; for the
+    contention pattern this guards (two opted-in orgs racing on a brand
+    new generic tag), the lock window is the inserting savepoint plus
+    the rest of the request handler, which is acceptable.
+
     Same pattern as ``_try_insert_contributor`` further down. The table
-    differs but the failure mode is identical.
+    differs but the failure mode is identical. The contributor path does
+    NOT need the locking variant because it only returns a boolean
+    ("did this org contribute?") and the IntegrityError already proves
+    the answer is "yes" without needing to materialize the row.
     """
     existing = await db.execute(
         select(TagDictionary).where(
@@ -440,12 +456,15 @@ async def _get_or_create_dictionary_row(
             await db.flush()
         return dictionary_tag
     except IntegrityError:
-        # Another opted-in org won the race. Re-fetch so we can wire the
-        # contributor row to the surviving dictionary id.
+        # Another opted-in org won the race. Re-fetch with a locking
+        # read so we bypass the REPEATABLE READ snapshot and see the
+        # row the racing transaction committed. Without this, the plain
+        # SELECT would not see it and ``scalar_one()`` would raise
+        # NoResultFound, rolling back the outer transaction.
         retry = await db.execute(
-            select(TagDictionary).where(
-                TagDictionary.name_normalized == name_normalized
-            )
+            select(TagDictionary)
+            .where(TagDictionary.name_normalized == name_normalized)
+            .with_for_update()
         )
         return retry.scalar_one()
 
