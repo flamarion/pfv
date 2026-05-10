@@ -108,7 +108,7 @@ def _detect_branch() -> str | None:
         or anything else goes wrong (worktree gitdir indirection,
         permissions, etc.)
 
-    Callers MUST treat None as "couldn't tell" — the lifespan guard
+    Callers MUST treat None as "couldn't tell" - the lifespan guard
     refuses to migrate in that case so we fail closed, not open.
     """
     try:
@@ -132,14 +132,14 @@ def _resolve_git_branch() -> str:
 
 def _migrate_off_main_override_set() -> bool:
     """True when the operator has opted in to lifespan migrations from
-    a non-main checkout. Mirrors the CLI guard in `./pfv migrate` — same
+    a non-main checkout. Mirrors the CLI guard in `./pfv migrate`. Same
     env var name on purpose so a single export covers both surfaces.
     """
     return os.environ.get("PFV_MIGRATE_OK_OFF_MAIN", "").strip() == "1"
 
 
 async def _run_migrations() -> None:
-    """Run Alembic migrations on startup. Idempotent — alembic upgrade head
+    """Run Alembic migrations on startup. Idempotent: alembic upgrade head
     is a no-op when already at the latest revision.
 
     Refuses to run when the host checkout is on a non-main branch unless
@@ -208,7 +208,7 @@ async def lifespan(app: FastAPI):
     # PRE_DEPLOY job in .do/app.yaml; initContainer in k8s/templates/
     # backend.yaml) so they don't gate uvicorn's port-bind. Dev runs them
     # inline because the dev orchestrator (docker-compose) has no PRE_DEPLOY
-    # equivalent — the alternative is a manual `./pfv migrate` after every
+    # equivalent. The alternative is a manual `./pfv migrate` after every
     # rebuild.
     if app_settings.app_env != "production":
         await _run_migrations()

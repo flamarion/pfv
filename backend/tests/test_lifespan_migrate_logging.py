@@ -2,9 +2,9 @@
 
 Covers two layers of `_run_migrations()` behavior:
 
-  1. Branch guard — refuses to run when the host checkout is off main
+  1. Branch guard: refuses to run when the host checkout is off main
      unless `PFV_MIGRATE_OK_OFF_MAIN=1` is set. Mirrors `./pfv migrate`.
-  2. Logging breadcrumb — emits `migrate.dev.target` /
+  2. Logging breadcrumb: emits `migrate.dev.target` /
      `migrate.dev.no_op` with current + head revisions and branch so the
      next alembic drift incident has a structured pointer.
 
@@ -190,7 +190,7 @@ def test_resolve_alembic_head_returns_string():
 
 
 # ----------------------------------------------------------------------
-# Branch guard tests — the lifespan must refuse to migrate when the
+# Branch guard tests: the lifespan must refuse to migrate when the
 # host checkout is off main unless PFV_MIGRATE_OK_OFF_MAIN=1 is set.
 # ----------------------------------------------------------------------
 
@@ -331,7 +331,7 @@ def test_detect_branch_reads_symbolic_ref(tmp_path, monkeypatch):
 
 
 def test_detect_branch_returns_none_for_detached_head(tmp_path, monkeypatch):
-    """A raw SHA in HEAD (detached) returns None — fail closed."""
+    """A raw SHA in HEAD (detached) returns None: fail closed."""
     head = tmp_path / "HEAD"
     head.write_text("a1b2c3d4e5f6\n")
     monkeypatch.setattr(app_main, "_GIT_HEAD_PATH", str(head))
