@@ -133,7 +133,7 @@ function setupApi(
   }) as never);
 }
 
-describe("CategoriesPage — C2 Edit mode + batch select", () => {
+describe("CategoriesPage -C2 Edit mode + batch select", () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
     vi.mocked(useAuth).mockReturnValue({
@@ -230,7 +230,7 @@ describe("CategoriesPage — C2 Edit mode + batch select", () => {
   });
 });
 
-describe("CategoriesPage — C2 batch move", () => {
+describe("CategoriesPage -C2 batch move", () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
     vi.mocked(useAuth).mockReturnValue({
@@ -353,7 +353,7 @@ describe("CategoriesPage — C2 batch move", () => {
   });
 });
 
-describe("CategoriesPage — C2 batch delete", () => {
+describe("CategoriesPage -C2 batch delete", () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
     vi.mocked(useAuth).mockReturnValue({
@@ -391,7 +391,7 @@ describe("CategoriesPage — C2 batch delete", () => {
         // 204 path: apiFetch returns undefined.
         return undefined;
       },
-      "/api/v1/categories/102": () => {
+      "/api/v1/categories/102?target_category_id=200": () => {
         return Promise.reject(
           new ApiResponseError(409, "last_in_type", undefined, {
             detail: "last_in_type",
@@ -410,9 +410,13 @@ describe("CategoriesPage — C2 batch delete", () => {
     fireEvent.click(screen.getByTestId("sub-checkbox-102"));
     fireEvent.click(screen.getByTestId("batch-delete-button"));
 
-    // 101 needs a target picker since transaction_count > 0; pick Lifestyle (200).
-    const targetSelect = await screen.findByTestId("batch-delete-target-101");
-    fireEvent.change(targetSelect, { target: { value: "200" } });
+    // C0 spec requires a migration target for ANY dependent (transactions,
+    // recurring templates, forecast plan items). The picker is always
+    // shown and must be picked for every selected sub.
+    const target101 = await screen.findByTestId("batch-delete-target-101");
+    fireEvent.change(target101, { target: { value: "200" } });
+    const target102 = await screen.findByTestId("batch-delete-target-102");
+    fireEvent.change(target102, { target: { value: "200" } });
 
     fireEvent.click(screen.getByTestId("batch-delete-confirm"));
 
