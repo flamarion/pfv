@@ -470,12 +470,20 @@ export default function ForecastPlansPage() {
     });
   }
 
-  // Chart data
-  const chartData = expenseItems.map((i) => ({
-    name: i.category_name,
-    planned: Number(i.planned_amount),
-    actual: Number(i.actual_amount),
-  }));
+  // Chart data. Memoized so the BarChart only re-layouts when the underlying
+  // expense items change, not on every parent render (period nav, form
+  // toggles, details-toggle, etc.). `categoryId` is preserved so the Cells
+  // below can use a stable key instead of the array index.
+  const chartData = useMemo(
+    () =>
+      expenseItems.map((i) => ({
+        categoryId: i.category_id,
+        name: i.category_name,
+        planned: Number(i.planned_amount),
+        actual: Number(i.actual_amount),
+      })),
+    [expenseItems],
+  );
 
   const plannedNet =
     Number(plan?.total_planned_income ?? 0) -
@@ -877,9 +885,9 @@ export default function ForecastPlansPage() {
                       radius={[4, 4, 4, 4]}
                       animationDuration={600}
                     >
-                      {chartData.map((d, i) => (
+                      {chartData.map((d) => (
                         <Cell
-                          key={i}
+                          key={d.categoryId}
                           fill={d.actual > d.planned ? chartColor.over : chartColor.actual}
                         />
                       ))}
