@@ -260,12 +260,26 @@ export default function ForecastPlansPage() {
     return cat.parent_id ?? cat.id;
   };
 
-  // Filtered items
-  const items = (plan?.items ?? []).filter(
-    (i) => viewFilter === "all" || i.type === viewFilter
+  // Filtered items. Memoized on the stable upstream `plan?.items` reference
+  // so downstream `chartData` (and the income/expense list renders below)
+  // don't churn on every parent re-render. Without this, the `.filter()`
+  // calls produced a fresh array reference every render and the
+  // `useMemo([expenseItems])` for `chartData` never hit.
+  const items = useMemo(
+    () =>
+      (plan?.items ?? []).filter(
+        (i) => viewFilter === "all" || i.type === viewFilter
+      ),
+    [plan?.items, viewFilter],
   );
-  const incomeItems = items.filter((i) => i.type === "income");
-  const expenseItems = items.filter((i) => i.type === "expense");
+  const incomeItems = useMemo(
+    () => items.filter((i) => i.type === "income"),
+    [items],
+  );
+  const expenseItems = useMemo(
+    () => items.filter((i) => i.type === "expense"),
+    [items],
+  );
 
   // ── Actions ──────────────────────────────────────────────────────────────
 
