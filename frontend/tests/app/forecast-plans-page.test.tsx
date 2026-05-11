@@ -663,4 +663,110 @@ describe("ForecastPlansClient — dropdown + refresh", () => {
     // The misleading old label is gone.
     expect(screen.queryByText("Avg (3mo)")).toBeNull();
   });
+
+  it("ensure-future refresh keeps the user on their selected period when a future stub appears newest-first", async () => {
+    // Regression for the periodIdx-shift bug. The backend lists
+    // periods newest-first; ensure-future may create a brand-new
+    // future stub that lands at index 0. Naively calling
+    // `setPeriods(fresh)` while keeping the stale `periodIdx` would
+    // silently shift the user off the current period onto the
+    // future stub. The fix re-derives the index by `start_date`.
+
+    const CURRENT_OPEN: BillingPeriod = {
+      id: 5,
+      start_date: "2026-05-01",
+      end_date: null,
+    };
+    const PAST: BillingPeriod = {
+      id: 4,
+      start_date: "2026-04-01",
+      end_date: "2026-04-30",
+    };
+    const FUTURE_STUB: BillingPeriod = {
+      id: 6,
+      start_date: "2026-06-01",
+      end_date: "2026-06-30",
+    };
+
+    // The RSC saw [CURRENT_OPEN, PAST] (no future stub yet). Current
+    // is at index 0 because end_date===null. That's where the user
+    // starts.
+    const initialPeriods = [CURRENT_OPEN, PAST];
+    const planForCurrent: ForecastPlan = {
+      ...makePlan([
+        {
+          category_id: 20,
+          category_name: "Groceries",
+          type: "expense",
+          planned_amount: 500,
+          source: "manual",
+        },
+      ]),
+      period_start: CURRENT_OPEN.start_date,
+    };
+
+    // After ensure-future fires, the backend now lists FUTURE_STUB at
+    // index 0 (newest-first), shifting CURRENT_OPEN to index 1 and
+    // PAST to index 2. Without the selection-preservation fix, the
+    // page would render the FUTURE_STUB (its start_date and the
+    // "future" label) instead of the user's selected current period.
+    const freshPeriods = [FUTURE_STUB, CURRENT_OPEN, PAST];
+
+    (apiFetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (path: string) => {
+        if (path.startsWith("/api/v1/settings/billing-periods/ensure-future")) {
+          return Promise.resolve([]);
+        }
+        if (path === "/api/v1/settings/billing-periods") {
+          return Promise.resolve(freshPeriods);
+        }
+        if (path.startsWith("/api/v1/forecast-plans?")) {
+          return Promise.resolve(planForCurrent);
+        }
+        return Promise.resolve(planForCurrent);
+      },
+    );
+
+    render(
+      <SWRConfig value={{ provider: () => new Map() }}>
+        <ForecastPlansClient
+          initialPeriods={initialPeriods}
+          initialCategories={CATEGORIES}
+          initialPlan={planForCurrent}
+        />
+      </SWRConfig>,
+    );
+
+    // Wait for ensure-future + the periods re-fetch to settle. The
+    // mock returns a 3-period list; once that lands, the page
+    // re-renders with the refreshed list. If the bug were live,
+    // periodIdx would still be 0 — which now points at FUTURE_STUB.
+    await waitFor(() => {
+      expect(
+        (apiFetch as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(
+          (c) =>
+            typeof c[0] === "string" &&
+            c[0] === "/api/v1/settings/billing-periods",
+        ).length,
+      ).toBeGreaterThanOrEqual(1);
+    });
+
+    // The selected-period label must still show CURRENT_OPEN's
+    // start_date AND its small "current" badge in the period nav —
+    // NOT FUTURE_STUB's start_date or its "future" badge.
+    await waitFor(() => {
+      expect(screen.getByText(CURRENT_OPEN.start_date)).toBeTruthy();
+    });
+    // The "current" pill in the period nav is an exact-match span;
+    // the contextual guidance paragraph uses the word "current"
+    // elsewhere, so target the badge precisely.
+    expect(
+      screen.getAllByText((_, el) => el?.textContent?.trim() === "current"),
+    ).not.toHaveLength(0);
+    expect(screen.queryByText(FUTURE_STUB.start_date)).toBeNull();
+    // No "future" badge — that would mean the page slid to the stub.
+    expect(
+      screen.queryByText((_, el) => el?.textContent?.trim() === "future"),
+    ).toBeNull();
+  });
 });

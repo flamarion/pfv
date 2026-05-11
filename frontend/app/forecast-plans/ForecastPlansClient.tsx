@@ -187,7 +187,15 @@ export default function ForecastPlansClient({
       keepPreviousData: true,
     },
   );
-  const plan = planData ?? null;
+  // Guard against `keepPreviousData` leaking stale plan state during
+  // period navigation: SWR holds the previous period's plan while the
+  // new key resolves, but mutations dispatched against that plan would
+  // hit the WRONG plan ID. Only expose `planData` to the rest of the
+  // component when its `period_start` matches the currently-selected
+  // period. During the gap the page shows its loading state (see the
+  // `fetching` derivation below) and action handlers no-op on null.
+  const plan: ForecastPlan | null =
+    planData && planData.period_start === periodStart ? planData : null;
 
   const isActive = plan?.status === "active";
   const isDraft = plan?.status === "draft";
@@ -206,10 +214,29 @@ export default function ForecastPlansClient({
     ? selectedPeriod.end_date !== null && selectedPeriod.end_date < today
     : false;
 
+  // Refs mirroring `periods` / `periodIdx` so the long-lived
+  // ensure-future async closure below can read the latest values
+  // without depending on them (which would re-run the once-per-mount
+  // effect every time the user navigates).
+  const periodsRef = useRef(periods);
+  const periodIdxRef = useRef(periodIdx);
+  useEffect(() => {
+    periodsRef.current = periods;
+    periodIdxRef.current = periodIdx;
+  }, [periods, periodIdx]);
+
   // ensure-future runs once per client mount. We then refresh periods
   // from the backend so any newly created stubs become navigable. The RSC
   // already seeded the initial periods, so this is purely a "catch up to
   // today" pass — quiet on failure.
+  //
+  // Selection-preservation: the backend lists periods newest-first, so a
+  // freshly-created future stub may slot in at index 0 and silently
+  // shift the user off the current period if we keep the stale
+  // `periodIdx`. Find the same period (by `start_date`) in the refreshed
+  // list and update the index. If their old period is gone (defensive —
+  // shouldn't happen), fall back to the open period that contains today,
+  // else index 0.
   const futureEnsured = useRef(false);
   useEffect(() => {
     if (futureEnsured.current) return;
@@ -222,9 +249,24 @@ export default function ForecastPlansClient({
         const fresh = await apiFetch<BillingPeriod[]>(
           "/api/v1/settings/billing-periods",
         );
-        if (Array.isArray(fresh) && fresh.length > 0) {
-          setPeriods(fresh);
+        if (!Array.isArray(fresh) || fresh.length === 0) return;
+
+        const currentStart =
+          periodsRef.current[periodIdxRef.current]?.start_date;
+        let nextIdx = currentStart
+          ? fresh.findIndex((p) => p.start_date === currentStart)
+          : -1;
+        if (nextIdx === -1) {
+          const today = new Date().toISOString().slice(0, 10);
+          const openIdx = fresh.findIndex(
+            (p) =>
+              p.start_date <= today &&
+              (p.end_date === null || today <= p.end_date),
+          );
+          nextIdx = openIdx !== -1 ? openIdx : 0;
         }
+        setPeriods(fresh);
+        if (nextIdx !== periodIdxRef.current) setPeriodIdx(nextIdx);
       } catch {
         // Non-fatal — the server-seeded periods are still usable.
       }
@@ -539,12 +581,15 @@ export default function ForecastPlansClient({
     Number(plan?.total_actual_income ?? 0) -
     Number(plan?.total_actual_expense ?? 0);
 
-  // Show the spinner only when SWR has no cached data AND is loading.
-  // With `fallbackData` from the RSC, the first paint always has data and
-  // skips the spinner entirely — only mid-flight period navigation can
-  // surface the loading state, and `keepPreviousData` keeps the previous
-  // period's data visible during that window anyway.
-  const fetching = planLoading && !plan;
+  // Show the spinner whenever SWR is mid-flight OR we have a selected
+  // period but no plan whose `period_start` matches it. The second clause
+  // matters during period navigation: SWR's `keepPreviousData` keeps the
+  // previous period's data in `planData`, but we deliberately blank it
+  // out in the `plan` derivation above so action handlers can't fire
+  // against the wrong plan ID. The page falls back to its loading state
+  // in that window instead of letting buttons act on stale state.
+  const fetching =
+    planLoading || (periodStart !== "" && !plan);
 
   return (
     <AppShell>
