@@ -379,7 +379,7 @@ export default function AdminDashboardPage() {
             >
               <dl className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
                 <div className="flex items-baseline gap-2">
-                  <dd className="font-display text-xl tabular-nums text-text-primary">
+                  <dd className="text-xl font-semibold tabular-nums text-text-primary">
                     {nf.format(data.kpis.total_orgs)}
                   </dd>
                   <dt className="text-xs uppercase tracking-[0.08em] text-text-muted">
@@ -387,7 +387,7 @@ export default function AdminDashboardPage() {
                   </dt>
                 </div>
                 <div className="flex items-baseline gap-2">
-                  <dd className="font-display text-xl tabular-nums text-text-primary">
+                  <dd className="text-xl font-semibold tabular-nums text-text-primary">
                     {nf.format(data.kpis.total_users)}
                   </dd>
                   <dt className="text-xs uppercase tracking-[0.08em] text-text-muted">
@@ -395,7 +395,7 @@ export default function AdminDashboardPage() {
                   </dt>
                 </div>
                 <div className="flex items-baseline gap-2">
-                  <dd className="font-display text-xl tabular-nums text-text-primary">
+                  <dd className="text-xl font-semibold tabular-nums text-text-primary">
                     {nf.format(data.kpis.active_subscriptions)}
                   </dd>
                   <dt className="text-xs uppercase tracking-[0.08em] text-text-muted">
@@ -403,7 +403,7 @@ export default function AdminDashboardPage() {
                   </dt>
                 </div>
                 <div className="flex items-baseline gap-2">
-                  <dd className="font-display text-xl tabular-nums text-text-primary">
+                  <dd className="text-xl font-semibold tabular-nums text-text-primary">
                     {nf.format(data.kpis.signups_last_7d)}
                   </dd>
                   <dt className="text-xs uppercase tracking-[0.08em] text-text-muted">
