@@ -236,9 +236,9 @@ function TransactionsPageContent() {
     // Period filter overrides date_from/date_to
     if (filterPeriod) {
       const per = periods.find((p) => String(p.id) === filterPeriod);
-      if (per) {
+      if (per && per.end_date !== null) {
         url += `&date_from=${per.start_date}`;
-        if (per.end_date) url += `&date_to=${per.end_date}`;
+        url += `&date_to=${per.end_date}`;
       }
     } else {
       if (filterDateFrom) url += `&date_from=${filterDateFrom}`;

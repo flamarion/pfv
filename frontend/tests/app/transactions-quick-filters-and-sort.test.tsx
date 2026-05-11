@@ -276,10 +276,22 @@ describe("TransactionsPage — quick filter buttons", () => {
 
     await screen.findByLabelText("Billing period");
     await waitFor(() => {
+      const periodsCallIndex = mock.mock.calls.findIndex(
+        (call) =>
+          typeof call[0] === "string" &&
+          (call[0] as string).startsWith("/api/v1/settings/billing-periods"),
+      );
+      expect(periodsCallIndex).toBeGreaterThanOrEqual(0);
+      const txUrlsAfterPeriodsLoad = listUrlsAfter(mock, periodsCallIndex + 1);
+      expect(txUrlsAfterPeriodsLoad.length).toBeGreaterThan(0);
+      expect(
+        txUrlsAfterPeriodsLoad.filter((url) =>
+          url.includes("date_from=2026-05-01"),
+        ),
+      ).toEqual([]);
       const stored = window.localStorage.getItem(FILTERS_KEY_TRANSACTIONS);
       expect(stored).not.toBeNull();
       expect(JSON.parse(stored!).filterPeriod).toBe("");
-      expect(lastListUrl(mock)).not.toContain("date_from=2026-05-01");
     });
   });
 
