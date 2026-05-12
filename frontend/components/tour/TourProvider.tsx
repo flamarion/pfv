@@ -176,6 +176,18 @@ function TourOverlay({ api }: { api: TourApi }) {
     return () => window.clearTimeout(t);
   }, [api, rect]);
 
+  // Escape closes the tour. The overlay is informative
+  // (aria-modal="false") so we do not trap focus, but a keyboard
+  // user should still be able to dismiss it without grabbing a mouse.
+  useEffect(() => {
+    if (!api.isActive) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") api.close();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [api]);
+
   if (!mounted) return null;
   if (!api.isActive) return null;
 

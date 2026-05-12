@@ -100,6 +100,22 @@ describe("Tour overlay theming", () => {
     );
   });
 
+  it("Escape closes the tour for keyboard users", () => {
+    render(
+      <TourProvider>
+        <Starter steps={["dashboard.header", "dashboard.import-cta"]} />
+      </TourProvider>,
+    );
+    startTour();
+    expect(screen.getByTestId("tour-card")).toBeInTheDocument();
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape" }),
+      );
+    });
+    expect(screen.queryByTestId("tour-card")).not.toBeInTheDocument();
+  });
+
   it("keeps the same token-driven classes when data-theme=light is active", () => {
     document.documentElement.setAttribute("data-theme", "light");
     render(
