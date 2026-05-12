@@ -25,7 +25,7 @@ the request/response wire shape.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.transaction import TransactionCreate
 
@@ -68,6 +68,30 @@ class BatchTransactionsRequest(BaseModel):
     rows: list[BatchTransactionRow] = Field(min_length=1, max_length=500)
 
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _row_numbers_must_be_unique(self) -> "BatchTransactionsRequest":
+        """Reject payloads with duplicate ``row_number`` values.
+
+        The response shape maps per-row results back to the user's input
+        order via ``row_number``; duplicates would collide and make
+        error reporting ambiguous. Pydantic converts the raised
+        ``ValueError`` into a 422 with the field locator pointing at
+        ``rows`` (and the duplicate values surfaced in the message).
+        """
+        seen: set[int] = set()
+        duplicates: list[int] = []
+        for row in self.rows:
+            if row.row_number in seen:
+                duplicates.append(row.row_number)
+            else:
+                seen.add(row.row_number)
+        if duplicates:
+            raise ValueError(
+                "row_number values must be unique across rows; "
+                f"duplicates: {sorted(set(duplicates))}"
+            )
+        return self
 
 
 class BatchRowError(BaseModel):

@@ -3,16 +3,26 @@
 Frozen per spec at
 ``~/.claude/projects/-Users-fjorge-src-pfv/specs/2026-05-12-l3-2-import-contracts.md``.
 
-Reconciliation is the post-confirm "inbox" UX. After a CSV or OFX import
-commits transactions, those rows are flagged ``reconciliation_state =
-PENDING_REVIEW`` (instead of the default ``ACCEPTED``). The Reconciliation
-UI presents them as a worklist; the user transitions each row to its final
-state via this endpoint.
+Reconciliation is an optional post-confirm "inbox" UX. The DEFAULT state
+for CSV- and OFX-confirm committed rows is ``ACCEPTED`` (Decision 3,
+2026-05-12): this preserves the current CSV-import UX where confirm
+commits transactions as final. The Reconciliation UI may later opt
+specific formats into landing as ``PENDING_REVIEW`` (e.g. flag OFX as
+"requires review" while keeping CSV at "accepted") on a per-format
+basis; the contract supports either default but the locked baseline is
+``ACCEPTED``.
 
-Wave 2 Reconciliation UI team owns the implementation, the migrations that
-add ``transactions.reconciliation_state``, ``transactions.import_batch_id``,
-and the ``import_batches`` table. This file freezes the wire shape and the
-state-transition rules.
+Wave 2 Reconciliation UI team owns:
+  - The migration that adds ``transactions.reconciliation_state``
+    (NOT NULL, DEFAULT 'accepted'), ``transactions.import_batch_id``
+    (nullable FK), and the new ``import_batches`` table.
+  - BACKFILL: existing imported rows (``is_imported=True``) must be
+    backfilled to ``reconciliation_state='accepted'`` so historical
+    imports do not retroactively land in the review inbox.
+  - The state-transition service and the inbox UI.
+
+This file freezes the wire shape and the state-transition rules; it
+does not implement them.
 """
 
 from __future__ import annotations

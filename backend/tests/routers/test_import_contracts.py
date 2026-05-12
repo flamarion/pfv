@@ -308,6 +308,55 @@ async def test_batch_validates_empty_rows(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_batch_rejects_duplicate_row_numbers(session_factory):
+    """Batch endpoint rejects duplicate ``row_number`` values with 422.
+
+    The response shape maps results back to the user's input via
+    ``row_number``; duplicates would collide. The ``model_validator``
+    on ``BatchTransactionsRequest`` is the gate. We verify the 422
+    surfaces and the error locator points at the ``rows`` field.
+    """
+    await _seed_user(session_factory)
+    app = _make_app(session_factory)
+    payload = {
+        "rows": [
+            {
+                "row_number": 1,
+                "transaction": {
+                    "account_id": 1,
+                    "category_id": 1,
+                    "description": "First",
+                    "amount": "1.00",
+                    "type": "expense",
+                    "date": "2026-05-10",
+                },
+            },
+            {
+                "row_number": 1,
+                "transaction": {
+                    "account_id": 1,
+                    "category_id": 1,
+                    "description": "Second",
+                    "amount": "2.00",
+                    "type": "expense",
+                    "date": "2026-05-10",
+                },
+            },
+        ],
+    }
+    with TestClient(app) as client:
+        resp = client.post("/api/v1/transactions/batch", json=payload)
+    assert resp.status_code == 422
+    body = resp.json()
+    rendered = repr(body)
+    # The Pydantic validator message names ``row_number`` and either
+    # ``unique`` or ``duplicate``. Both signals must surface so the
+    # frontend can render a meaningful 422.
+    assert "row_number" in rendered
+    assert "unique" in rendered.lower() or "duplicate" in rendered.lower()
+
+
+@pytest.mark.asyncio
 async def test_batch_validates_max_rows(session_factory):
     """Batch endpoint rejects more than 500 rows (max_length=500)."""
     await _seed_user(session_factory)
@@ -444,3 +493,30 @@ async def test_openapi_advertises_all_new_endpoints(session_factory):
         "ReconciliationState",
     ):
         assert name in components, f"OpenAPI missing component: {name}"
+
+
+@pytest.mark.asyncio
+async def test_openapi_exposes_ofx_row_fields(session_factory):
+    """OFX-specific fields MUST surface on the shared row schemas.
+
+    Regression gate for the Wave 2 OFX team: ``fitid``, ``bank_id``,
+    ``account_type_ofx`` live on ``ImportPreviewRow`` and
+    ``ImportConfirmRow`` (the shared row schemas in
+    ``app/schemas/import_schemas.py``), NOT on a sidecar model. This
+    test asserts the OpenAPI component for both row schemas advertises
+    all three fields so Wave 2's generated client picks them up.
+    """
+    app = _make_app(session_factory)
+    schema = app.openapi()
+    components = schema.get("components", {}).get("schemas", {})
+
+    for row_schema_name in ("ImportPreviewRow", "ImportConfirmRow"):
+        assert row_schema_name in components, (
+            f"OpenAPI missing row schema: {row_schema_name}"
+        )
+        props = components[row_schema_name].get("properties", {})
+        for field in ("fitid", "bank_id", "account_type_ofx"):
+            assert field in props, (
+                f"OpenAPI {row_schema_name} missing OFX field: {field}. "
+                "Wave 2 OFX team builds against these — they must surface."
+            )

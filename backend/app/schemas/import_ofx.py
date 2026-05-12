@@ -4,56 +4,22 @@ Frozen per spec at
 ``~/.claude/projects/-Users-fjorge-src-pfv/specs/2026-05-12-l3-2-import-contracts.md``.
 
 These schemas extend (not replace) the existing CSV preview/confirm flow:
-- The OFX preview endpoint returns ``ImportPreviewResponse`` (the CSV one),
-  populating optional OFX-specific fields on each ``ImportPreviewRow``.
-- The OFX confirm path reuses ``POST /api/v1/import/confirm`` — no new
-  confirm schema needed; the OFX-specific fields ride on the same
-  ``ImportConfirmRow`` shape (which is forward-compatible because the model
-  uses ``extra="forbid"`` only for fields it knows about; new optional
-  fields on ``ImportPreviewRow`` are echoed by the frontend into the
-  confirm payload only if they're declared on ``ImportConfirmRow``).
+- The OFX preview endpoint returns ``ImportPreviewResponse`` (the CSV one)
+  from ``app.schemas.import_schemas``. The OFX-specific fields
+  (``fitid``, ``bank_id``, ``account_type_ofx``) live DIRECTLY on
+  ``ImportPreviewRow`` / ``ImportConfirmRow`` so OpenAPI exposes them and
+  the ``extra="forbid"`` constraint allows them through.
+- The OFX confirm path reuses ``POST /api/v1/import/confirm`` and the same
+  ``ImportConfirmRow`` shape; the OFX extras ride on echoed fields.
 
-Wave 2 OFX team owns the parser implementation; this file only freezes
-the request/response wire shape.
+Wave 2 OFX team owns the parser implementation; this file freezes the
+OFX-specific request envelope and the diagnostics block. The row-level
+schema is the single source of truth in ``import_schemas.py``.
 """
 
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field
-
-
-# ── OFX-specific row extras (echoed into ImportPreviewRow.fitid etc.) ──
-
-
-class OFXRowExtras(BaseModel):
-    """OFX-specific fields that ride on ``ImportPreviewRow``.
-
-    None of these are required on the CSV path. The OFX parser populates
-    them when the source is OFX; the frontend may echo them back into
-    confirm-payload metadata for audit / future locale dispatch.
-
-    Fields:
-        fitid: Bank-side unique transaction id from ``<FITID>``. Per OFX
-            spec §11.4.4, guaranteed unique within (bank_id, account).
-            Used as the primary dedup signal for OFX imports — when
-            present, takes precedence over the description/date/amount
-            5-tuple key.
-        bank_id: ``<BANKID>`` from ``<BANKACCTFROM>`` or ``<CCACCTFROM>``.
-            Used for cross-account dedup scoping (an OFX from bank A and
-            bank B with overlapping FITIDs is still two distinct streams).
-        account_type_ofx: OFX ``<ACCTTYPE>`` value. One of:
-            CHECKING, SAVINGS, CREDITLINE, MONEYMRKT. Informational only —
-            does NOT auto-pick an ``AccountType`` (user already chose
-            ``account_id`` at upload).
-    """
-
-    fitid: str | None = Field(default=None, max_length=128)
-    bank_id: str | None = Field(default=None, max_length=64)
-    account_type_ofx: Literal["CHECKING", "SAVINGS", "CREDITLINE", "MONEYMRKT"] | None = None
-
-    model_config = ConfigDict(extra="forbid")
 
 
 # ── Request envelope ──
@@ -77,15 +43,23 @@ class ImportOFXPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-# ── Response envelope ──
-# Note: actual response uses ``ImportPreviewResponse`` from
-# ``app.schemas.import_schemas`` so OFX and CSV preview share a UI reducer.
-# The Wave 2 OFX team adds ``fitid``, ``bank_id``, ``account_type_ofx`` to
-# ``ImportPreviewRow`` (as nullable fields) when implementing the parser;
-# this contract reserves those field names.
+# ── Row-level OFX fields live on the shared row schemas ──
+#
+# The three OFX-specific row fields (``fitid``, ``bank_id``,
+# ``account_type_ofx``) are declared directly on ``ImportPreviewRow`` and
+# ``ImportConfirmRow`` in ``app/schemas/import_schemas.py``. They are
+# nullable and default to ``None`` on the CSV path. OpenAPI exposes them
+# as part of the existing ``ImportPreviewResponse`` schema component.
+#
+# This intentional consolidation (vs. a separate ``OFXRowExtras`` model)
+# means:
+#   1. One row schema, one UI reducer.
+#   2. ``extra="forbid"`` on the row models stays — fields are declared.
+#   3. OpenAPI exposes the contract surface Wave 2 builds against.
+#   4. No model-merging gymnastics at the service layer.
 
 
-# ── Parser metadata response (diagnostic; optional Wave 2) ──
+# ── Parser diagnostics (optional Wave 2 add-on) ──
 
 
 class OFXParseDiagnostics(BaseModel):
