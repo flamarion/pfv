@@ -773,7 +773,7 @@ export default function DashboardPage() {
                     />
                     <div className="absolute right-3 top-3">
                       <HelpTooltip
-                        content="Projects each account's balance to month end using settled balance plus pending transactions and any planned recurring activity."
+                        content="Each account's current balance plus its pending transactions in this billing period. Recurring activity is not factored in."
                         learnMoreSection="forecasts"
                         triggerLabel="How is the end of month forecast calculated?"
                       />

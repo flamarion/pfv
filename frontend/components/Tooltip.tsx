@@ -1,13 +1,10 @@
 "use client";
 
 import {
-  cloneElement,
-  isValidElement,
   useCallback,
   useEffect,
   useId,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -120,12 +117,24 @@ export default function Tooltip({
     placement: "top",
   });
 
-  const triggerRef = useRef<HTMLElement | null>(null);
+  const triggerRef = useRef<HTMLSpanElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const reducedMotion = useReducedMotion();
 
   useEffect(() => {
     setMounted(true);
+  }, []);
+
+  const focusTrigger = useCallback(() => {
+    // The wrapper span is not itself focusable, so find the first
+    // focusable descendant (typically the default "?" <button>, or the
+    // first focusable element inside a caller-supplied trigger).
+    const wrapper = triggerRef.current;
+    if (!wrapper) return;
+    const focusable = wrapper.querySelector<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    focusable?.focus();
   }, []);
 
   const close = useCallback(() => {
@@ -139,9 +148,9 @@ export default function Tooltip({
       document.activeElement &&
       tooltipRef.current.contains(document.activeElement)
     ) {
-      triggerRef.current?.focus();
+      focusTrigger();
     }
-  }, []);
+  }, [focusTrigger]);
 
   const computePosition = useCallback(() => {
     const triggerEl = triggerRef.current;
@@ -230,6 +239,29 @@ export default function Tooltip({
     return () => document.removeEventListener("keydown", onKey);
   }, [open, close]);
 
+  // Imperatively set aria-describedby on the first focusable descendant
+  // when the tooltip is open. We don't pass this through React props
+  // because the custom-trigger path can't safely set props on a child
+  // we don't own (and we deliberately avoid cloneElement to stay clear
+  // of the react-hooks/refs lint rule). Cleanup removes the attribute
+  // so screen readers don't reference a stale id.
+  useEffect(() => {
+    const wrapper = triggerRef.current;
+    if (!wrapper) return;
+    const focusable = wrapper.querySelector<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    if (!focusable) return;
+    if (open) {
+      focusable.setAttribute("aria-describedby", tooltipId);
+    } else {
+      focusable.removeAttribute("aria-describedby");
+    }
+    return () => {
+      focusable.removeAttribute("aria-describedby");
+    };
+  }, [open, tooltipId]);
+
   const handleMouseEnter = useCallback(() => setOpen(true), []);
   const handleMouseLeave = useCallback((e: React.MouseEvent) => {
     // Don't close if the cursor moved into the tooltip itself (so users
@@ -255,61 +287,48 @@ export default function Tooltip({
     [open, close],
   );
 
-  const setTriggerRef = useCallback((el: HTMLElement | null) => {
-    triggerRef.current = el;
-  }, []);
+  // The trigger is rendered inside a wrapping <span> that owns the ref
+  // and the event handlers. This sidesteps the React 19 react-hooks/refs
+  // lint rule (which forbids passing refs through cloneElement) and lets
+  // any custom trigger element work without needing forwardRef. Focus +
+  // hover events bubble through React's synthetic event system, so the
+  // wrapper still sees them even though the focusable element is the
+  // child <button>. The span uses `inline-flex` so its layout footprint
+  // matches the child's natural inline-block size.
+  //
+  // `aria-describedby` is wired imperatively onto the first focusable
+  // descendant (typically the inner <button>) via the effect below, so
+  // assistive tech announces the bubble's content on the actual focused
+  // element instead of an interaction-empty wrapper.
 
-  // Build the trigger node. If the caller passed a custom trigger, clone
-  // it and inject our handlers + ARIA wiring while preserving theirs.
-  const triggerNode = useMemo(() => {
-    if (trigger && isValidElement(trigger)) {
-      const existingProps = (trigger.props ?? {}) as Record<string, unknown>;
-      const mergedProps: Record<string, unknown> = {
-        ref: setTriggerRef,
-        "aria-describedby": open
-          ? `${existingProps["aria-describedby"] ?? ""} ${tooltipId}`.trim()
-          : (existingProps["aria-describedby"] as string | undefined),
-        onMouseEnter: (e: React.MouseEvent) => {
-          (existingProps.onMouseEnter as ((e: React.MouseEvent) => void) | undefined)?.(e);
-          handleMouseEnter();
-        },
-        onMouseLeave: (e: React.MouseEvent) => {
-          (existingProps.onMouseLeave as ((e: React.MouseEvent) => void) | undefined)?.(e);
-          handleMouseLeave(e);
-        },
-        onFocus: (e: React.FocusEvent) => {
-          (existingProps.onFocus as ((e: React.FocusEvent) => void) | undefined)?.(e);
-          handleFocus();
-        },
-        onBlur: (e: React.FocusEvent) => {
-          (existingProps.onBlur as ((e: React.FocusEvent) => void) | undefined)?.(e);
-          handleBlur(e);
-        },
-        onClick: (e: React.MouseEvent) => {
-          (existingProps.onClick as ((e: React.MouseEvent) => void) | undefined)?.(e);
-          handleClick();
-        },
-        onKeyDown: (e: ReactKeyboardEvent) => {
-          (existingProps.onKeyDown as ((e: ReactKeyboardEvent) => void) | undefined)?.(e);
-          handleKeyDown(e);
-        },
-      };
-      return cloneElement(trigger, mergedProps);
-    }
+  const wrapperHandlers = {
+    onMouseEnter: handleMouseEnter,
+    onMouseLeave: handleMouseLeave,
+    onFocus: handleFocus,
+    onBlur: handleBlur,
+    onClick: handleClick,
+    onKeyDown: handleKeyDown,
+  };
 
-    return (
+  const triggerNode = trigger ? (
+    <span
+      ref={triggerRef}
+      data-testid="tooltip-trigger-wrapper"
+      className="inline-flex"
+      {...wrapperHandlers}
+    >
+      {trigger as ReactElement}
+    </span>
+  ) : (
+    <span
+      ref={triggerRef}
+      className="inline-flex"
+      {...wrapperHandlers}
+    >
       <button
         type="button"
-        ref={setTriggerRef as (el: HTMLButtonElement | null) => void}
         aria-label={triggerLabel}
-        aria-describedby={open ? tooltipId : undefined}
         data-testid="tooltip-trigger"
-        onMouseEnter={handleMouseEnter}
-        onMouseLeave={handleMouseLeave}
-        onFocus={handleFocus}
-        onBlur={handleBlur}
-        onClick={handleClick}
-        onKeyDown={handleKeyDown}
         className={`inline-flex min-h-[24px] min-w-[24px] items-center justify-center rounded-full text-text-muted hover:text-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/30 ${className}`}
       >
         <svg
@@ -329,21 +348,8 @@ export default function Tooltip({
           <circle cx="8.05" cy="11.2" r="0.55" fill="currentColor" stroke="none" />
         </svg>
       </button>
-    );
-  }, [
-    trigger,
-    setTriggerRef,
-    triggerLabel,
-    open,
-    tooltipId,
-    handleMouseEnter,
-    handleMouseLeave,
-    handleFocus,
-    handleBlur,
-    handleClick,
-    handleKeyDown,
-    className,
-  ]);
+    </span>
+  );
 
   const bubbleStyle: CSSProperties = {
     position: "fixed",
