@@ -20,6 +20,10 @@ from app.schemas.account import (
     ReconcileResponse,
 )
 from app.services import audit_service
+from app.services.account_type_change_service import (
+    change_account_type,
+    validate_create_close_day,
+)
 from app.services.exceptions import ConflictError, ValidationError
 from app.services.transaction_service import (
     adjust_account_balance,
@@ -84,8 +88,17 @@ async def create_account(
             AccountType.org_id == current_user.org_id,
         )
     )
-    if at_result.scalar_one_or_none() is None:
+    target_type = at_result.scalar_one_or_none()
+    if target_type is None:
         raise HTTPException(status_code=400, detail="Invalid account type")
+
+    # Spec § 3.1.1 — create-path close_day cascade. Mirrors the PUT
+    # path's invariant (close_day IS NULL iff slug != 'credit_card').
+    # Before this rule the create endpoint silently accepted any
+    # combination, e.g. a Checking account with close_day=15.
+    validate_create_close_day(
+        target_slug=target_type.slug, close_day_value=body.close_day
+    )
 
     # opening_balance_date: caller may omit (and ride the DB default of
     # CURRENT_DATE) or supply an explicit date. We pass it through only
@@ -140,6 +153,92 @@ async def update_account(
     db: AsyncSession = Depends(get_db),
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
 ):
+    # Spec § 4.3: writes that touch ``account_type_id`` or ``close_day``
+    # run through the service-owned transaction so a SELECT ... FOR UPDATE
+    # row lock acquires on a fresh session, not on the auth-autobegun
+    # request session. Pure name / is_active / is_default / opening_balance
+    # edits stay on the request session.
+    touches_type_or_close_day = (
+        body.account_type_id is not None or "close_day" in body.model_fields_set
+    )
+
+    actor_user_id = current_user.id
+    actor_email = current_user.email
+    actor_org_id = current_user.org_id
+    req_id = _request_id()
+    ip = get_client_ip(request)
+
+    type_change_result = None
+    if touches_type_or_close_day:
+        # Target type may be omitted (close-day-only edit). When omitted,
+        # the service still locks the row, validates the cascade against
+        # the row's current type, and persists the close_day update.
+        target_type_id = body.account_type_id
+        if target_type_id is None:
+            # Fetch current type id on the request session so the service
+            # gets a concrete int. The service's locked re-read is the
+            # source of truth; this is just to pass the argument through.
+            current_type_id = await db.scalar(
+                select(Account.account_type_id).where(
+                    Account.id == account_id,
+                    Account.org_id == actor_org_id,
+                )
+            )
+            if current_type_id is None:
+                raise HTTPException(status_code=404, detail="Account not found")
+            target_type_id = current_type_id
+
+        type_change_result = await change_account_type(
+            session_factory=session_factory,
+            account_id=account_id,
+            org_id=actor_org_id,
+            target_type_id=target_type_id,
+            close_day_in_payload="close_day" in body.model_fields_set,
+            close_day_value=body.close_day,
+        )
+
+        if type_change_result.type_changed:
+            # Spec § 6 — emit audit only when type actually changed.
+            await audit_service.record_audit_event(
+                session_factory,
+                event_type="account.type_changed",
+                actor_user_id=actor_user_id,
+                actor_email=actor_email,
+                target_org_id=actor_org_id,
+                target_org_name=None,
+                request_id=req_id,
+                ip_address=ip,
+                outcome="success",
+                detail={
+                    "account_id": account_id,
+                    "old_type_id": type_change_result.old_type_id,
+                    "new_type_id": type_change_result.new_type_id,
+                    "old_type_slug": type_change_result.old_type_slug,
+                    "new_type_slug": type_change_result.new_type_slug,
+                    "closes_day_set": type_change_result.new_close_day
+                    if type_change_result.new_type_slug == "credit_card"
+                    and type_change_result.old_type_slug != "credit_card"
+                    else None,
+                    "closes_day_cleared": type_change_result.old_close_day
+                    if type_change_result.old_type_slug == "credit_card"
+                    and type_change_result.new_type_slug != "credit_card"
+                    else None,
+                },
+            )
+            await logger.ainfo(
+                "account.type_changed",
+                actor_user_id=actor_user_id,
+                actor_email=actor_email,
+                target_org_id=actor_org_id,
+                account_id=account_id,
+                old_type_slug=type_change_result.old_type_slug,
+                new_type_slug=type_change_result.new_type_slug,
+            )
+
+        # Refresh the request session's snapshot so subsequent reads
+        # (and the rest of this handler) see the committed state.
+        await db.commit()
+
     result = await db.execute(
         select(Account)
         .options(selectinload(Account.account_type))
@@ -157,16 +256,6 @@ async def update_account(
 
     if body.name is not None:
         account.name = body.name
-    if body.account_type_id is not None:
-        at_result = await db.execute(
-            select(AccountType).where(
-                AccountType.id == body.account_type_id,
-                AccountType.org_id == current_user.org_id,
-            )
-        )
-        if at_result.scalar_one_or_none() is None:
-            raise HTTPException(status_code=400, detail="Invalid account type")
-        account.account_type_id = body.account_type_id
     if body.is_active is not None:
         if body.is_active is False and account.balance != 0:
             raise HTTPException(
@@ -174,8 +263,6 @@ async def update_account(
                 detail=f"Cannot deactivate account with balance {account.balance}. Transfer the balance first.",
             )
         account.is_active = body.is_active
-    if "close_day" in body.model_fields_set:
-        account.close_day = body.close_day
     if body.is_default is True:
         async with db.begin_nested():
             await db.execute(
@@ -200,13 +287,6 @@ async def update_account(
         account.opening_balance_date = body.opening_balance_date
         opening_changed = True
 
-    # Capture identity NOW so any post-commit expire doesn't break the
-    # audit-event payload.
-    actor_user_id = current_user.id
-    actor_email = current_user.email
-    actor_org_id = current_user.org_id
-    req_id = _request_id()
-    ip = get_client_ip(request)
     new_opening_balance = account.opening_balance
     new_opening_balance_date = account.opening_balance_date
 
