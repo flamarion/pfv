@@ -1198,3 +1198,106 @@ async def test_concurrent_skip_serializes_via_row_lock(db_session):
 
     assert after_first == pre_import_balance
     assert after_second == pre_import_balance
+
+
+# ── PR #247 round 4 P1: MATCHED -> ACCEPTED preserves the revert ────────────
+
+
+@pytest.mark.asyncio
+async def test_match_then_accept_keeps_balance_dropped_and_row_non_reportable(
+    db_session,
+):
+    """MATCHED revert must NOT be undone when the row later moves
+    MATCHED -> ACCEPTED. The row stays linked (``linked_transaction_id``
+    is set), so ``is_reportable_transaction`` returns False at both
+    ends -- the balance bookkeeping diff is False -> False and fires
+    no balance change. Round 3 got this wrong by deciding solely on
+    reconciliation_state.
+    """
+    from app.services.transaction_filters import is_reportable_transaction
+
+    seed = await _seed(db_session)
+    # Snapshot the cached balance BEFORE any apply, then mirror the
+    # post-import world by debiting row 0's amount once.
+    pre_import_balance = (
+        await db_session.scalar(
+            select(Account).where(Account.id == seed["account_id"])
+        )
+    ).balance
+    await _pre_apply_balance(
+        db_session, seed["account_id"], seed["tx_ids"][0]
+    )
+    post_import_balance = (
+        await db_session.scalar(
+            select(Account).where(Account.id == seed["account_id"])
+        )
+    ).balance
+    assert post_import_balance == pre_import_balance - Decimal("12.50")
+
+    # Make a canonical transaction outside the batch to match against.
+    canonical = Transaction(
+        org_id=seed["org_id"],
+        account_id=seed["account_id"],
+        category_id=seed["category_id"],
+        description="Canonical",
+        amount=Decimal("12.50"),
+        type=TransactionType.EXPENSE,
+        status=TransactionStatus.SETTLED,
+        date=date(2026, 5, 9),
+        settled_date=date(2026, 5, 9),
+        is_imported=False,
+        reconciliation_state="accepted",
+    )
+    db_session.add(canonical)
+    await db_session.commit()
+
+    # 1. pending_review -> matched: balance reverts to pre-import.
+    await reconciliation_service.reconcile_request(
+        db_session,
+        org_id=seed["org_id"],
+        batch_id=seed["batch_id"],
+        request=ReconcileBatchRequest(
+            transitions=[
+                ReconciliationTransition(
+                    transaction_id=seed["tx_ids"][0],
+                    to_state=ReconciliationState.MATCHED,
+                    match_with_transaction_id=canonical.id,
+                )
+            ]
+        ),
+    )
+    acct = await db_session.scalar(
+        select(Account).where(Account.id == seed["account_id"])
+    )
+    assert acct.balance == pre_import_balance
+
+    # 2. matched -> accepted: row STAYS linked, so reportability is
+    #    still False; balance must NOT change. Round-3 code re-applied
+    #    here, drifting the balance by +12.50.
+    await reconciliation_service.reconcile_request(
+        db_session,
+        org_id=seed["org_id"],
+        batch_id=seed["batch_id"],
+        request=ReconcileBatchRequest(
+            transitions=[
+                ReconciliationTransition(
+                    transaction_id=seed["tx_ids"][0],
+                    to_state=ReconciliationState.ACCEPTED,
+                )
+            ]
+        ),
+    )
+
+    acct = await db_session.scalar(
+        select(Account).where(Account.id == seed["account_id"])
+    )
+    # Critical assertion: balance stayed at pre-import (no re-apply).
+    assert acct.balance == pre_import_balance
+
+    # The row is still non-reportable (linked_transaction_id is set).
+    matched_row = await db_session.scalar(
+        select(Transaction).where(Transaction.id == seed["tx_ids"][0])
+    )
+    assert matched_row.linked_transaction_id == canonical.id
+    assert matched_row.reconciliation_state == "accepted"
+    assert is_reportable_transaction(matched_row) is False

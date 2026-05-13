@@ -106,38 +106,33 @@ PENDING_STATES: frozenset[str] = frozenset(
     }
 )
 
-# L3.2 Wave 2B (PR #247 P1 round 3) -- balance bookkeeping matrix.
+# L3.2 Wave 2B (PR #247 round 4 P1) -- ledger-correct balance bookkeeping.
 #
 # Imported SETTLED rows applied ``accounts.balance`` at confirm time
-# (via ``transaction_service.apply_balance``). Each reconciliation
-# state has to decide whether that balance application is still valid
-# in steady state:
+# (via ``transaction_service.apply_balance``). The cached balance must
+# stay in sync with the **reportable set** of transactions, not with
+# the reconciliation state in isolation -- otherwise transitions that
+# flip reportability through OTHER paths (e.g. MATCHED setting
+# ``linked_transaction_id``) silently desync the cached balance from
+# the aggregates the user sees in dashboards / budgets.
 #
-#   ACCEPTED        keep   the row was right as-imported.
-#   PENDING_REVIEW  keep   user has not decided yet; balance reflects
-#                          the bank's view.
-#   UNMATCHED       keep   same as PENDING_REVIEW.
-#   EDITED          keep   ``_apply_edits`` already adjusted the cached
-#                          balance for the amount delta; the row's
-#                          amount IS the truth.
-#   MATCHED         drop   the matched-against row is the canonical
-#                          ledger entry, so this row's amount is a
-#                          duplicate that should not double-count.
-#   SKIPPED         drop   spec: "not counted in budgets/forecasts" --
-#                          and not in the cached balance either.
-#   REJECTED        drop   spec: "deleted entirely" -- soft-deleted
-#                          here for audit recoverability.
+# Source of truth for "does this row contribute to the cached balance?"
+# is ``transaction_filters.is_reportable_transaction``: a row counts
+# iff it's reportable. So the balance bookkeeping rule reduces to a
+# simple before/after diff:
 #
-# The state transitions revert balance when moving keep -> drop, and
-# re-apply balance when moving drop -> keep (reopen path).
-_BALANCE_KEPT_STATES: frozenset[str] = frozenset(
-    {
-        ReconciliationState.PENDING_REVIEW.value,
-        ReconciliationState.UNMATCHED.value,
-        ReconciliationState.ACCEPTED.value,
-        ReconciliationState.EDITED.value,
-    }
-)
+#   source_reportable  target_reportable  action
+#   -----------------  -----------------  -------
+#         True               True         no-op
+#         False              False        no-op
+#         True               False        revert_balance
+#         False              True         apply_balance
+#
+# Round 3's ``_BALANCE_KEPT_STATES`` matrix got MATCHED -> ACCEPTED
+# wrong: the link was already set on entering MATCHED, so the row was
+# already non-reportable, but the matrix re-applied based on state
+# alone. Deriving the decision from ``is_reportable_transaction`` is
+# correct by construction across every transition.
 
 
 # ── Batch creation (called from CSV / OFX confirm) ──────────────────────────
@@ -575,26 +570,30 @@ async def _apply_balance_for_transition(
     tx: Transaction,
     source_state: str,
     target_state: str,
+    source_reportable: bool,
 ) -> None:
     """Revert or re-apply the row's balance contribution based on the
-    keep/drop matrix in ``_BALANCE_KEPT_STATES``.
+    reportability diff between before-mutation and after-mutation
+    snapshots of the transaction.
 
-    Drop -> keep (e.g. SKIPPED -> PENDING_REVIEW reopen): re-apply
-    ``tx.amount`` to ``accounts.balance``. The row was previously
-    reverted at the drop transition; bringing it back into the
-    reportable set restores the original balance contribution.
+    ``source_reportable`` is captured by ``_reconcile_one`` BEFORE any
+    state-flip or link-mutation runs. ``target_reportable`` is read
+    here AFTER those mutations have landed on the in-memory instance.
+    The diff drives the action:
 
-    Keep -> drop (e.g. ACCEPTED -> PENDING_REVIEW + SKIPPED, or
-    PENDING_REVIEW -> MATCHED): revert ``tx.amount`` from
-    ``accounts.balance``. The row stays in the DB for audit
-    recoverability but its amount no longer counts.
+        True  -> True   no-op (still reportable, balance unchanged)
+        False -> False  no-op (still excluded, balance unchanged)
+        True  -> False  revert_balance (row drops out of reports)
+        False -> True   apply_balance  (row enters reports)
 
-    Same-side transitions (keep -> keep, drop -> drop) are no-ops --
-    the cached balance already reflects the right answer.
+    This shape is correct by construction across every state path,
+    including the MATCHED -> ACCEPTED case round 3 got wrong: both
+    states are non-reportable while ``linked_transaction_id`` is set,
+    so the diff is False -> False and no balance change fires.
 
-    Only SETTLED rows touched the cached balance at import time, so
-    PENDING rows skip this dance entirely (their balance is virtual
-    until settlement, handled by the existing forecast/pending-delta
+    Only SETTLED rows ever touched the cached balance at import time,
+    so PENDING rows skip this dance entirely (their balance is virtual
+    until settlement, handled by the existing forecast / pending-delta
     code path).
 
     The account row is locked via ``get_account_for_update`` for the
@@ -606,29 +605,34 @@ async def _apply_balance_for_transition(
     if tx.status.value != "settled":
         return
 
-    source_kept = source_state in _BALANCE_KEPT_STATES
-    target_kept = target_state in _BALANCE_KEPT_STATES
-    if source_kept == target_kept:
-        # Same side of the matrix; cached balance already correct.
-        return
-
-    # Imports here are deferred so the module-load order stays safe
-    # (transaction_service does NOT import reconciliation_service, but
-    # reconciliation_service is referenced from import_service which
-    # transaction_service touches transitively).
+    # Imports are deferred so module-load order stays safe (transaction_service
+    # does NOT import reconciliation_service, but reconciliation_service is
+    # referenced from import_service which transaction_service touches
+    # transitively).
+    from app.services.transaction_filters import is_reportable_transaction
     from app.services.transaction_service import (
         apply_balance,
         get_account_for_update,
         revert_balance,
     )
 
+    # ``is_reportable_transaction`` reads ``reconciliation_state``,
+    # ``linked_transaction_id``, and ``is_manual_adjustment`` directly
+    # off the instance. By this point ``_apply_edits`` / ``_apply_match``
+    # plus the caller's state flip have already mutated the instance,
+    # so this snapshot is the post-transition reportability.
+    target_reportable = is_reportable_transaction(tx)
+    if source_reportable == target_reportable:
+        # Same side of the diff; cached balance already correct.
+        return
+
     acct = await get_account_for_update(db, tx.account_id, org_id)
-    if source_kept and not target_kept:
-        # keep -> drop: revert the row's amount from the cached balance.
+    if source_reportable and not target_reportable:
+        # Row leaves the reportable set: pull its amount out of balance.
         revert_balance(acct, tx.amount, tx.type)
         direction = "revert"
     else:
-        # drop -> keep: re-apply the row's amount.
+        # Row enters (or re-enters) the reportable set.
         apply_balance(acct, tx.amount, tx.type)
         direction = "reapply"
 
@@ -646,6 +650,8 @@ async def _apply_balance_for_transition(
         direction=direction,
         amount=str(tx.amount),
         tx_type=tx.type.value,
+        source_reportable=source_reportable,
+        target_reportable=target_reportable,
     )
 
 
@@ -694,11 +700,22 @@ async def _reconcile_one(
         source_state=source_state, target_state=target_state
     )
 
+    # Capture the source-reportability snapshot BEFORE any mutation.
+    # ``is_reportable_transaction`` reads live attributes off the
+    # instance, so this must run before ``_apply_edits`` /
+    # ``_apply_match`` / the state flip touch anything. The diff
+    # against the post-mutation reportability drives balance bookkeeping
+    # below (PR #247 round 4 P1).
+    from app.services.transaction_filters import is_reportable_transaction
+    source_reportable = is_reportable_transaction(tx)
+
     # Optional payload application (edits / match) BEFORE the state flip
     # so a payload validation error doesn't leave the row in a half-
-    # updated state. ``_apply_edits`` runs its own balance bookkeeping
-    # for amount deltas; ``_apply_match`` does NOT touch the balance --
-    # we handle the MATCHED revert below in the common path.
+    # updated state. ``_apply_edits`` handles its own amount-delta
+    # balance bookkeeping when the reportability side does NOT flip
+    # (e.g. PENDING_REVIEW -> EDITED, both reportable). ``_apply_match``
+    # writes ``linked_transaction_id`` which DOES flip reportability;
+    # the diff-based helper below absorbs that.
     if target_state == ReconciliationState.EDITED.value:
         await _apply_edits(db, org_id=org_id, tx=tx, transition=transition)
     elif target_state == ReconciliationState.MATCHED.value:
@@ -706,19 +723,19 @@ async def _reconcile_one(
             db, org_id=org_id, tx=tx, transition=transition
         )
 
-    # Balance bookkeeping (PR #247 round 3 P1). Only SETTLED rows ever
-    # touched the cached balance; PENDING rows are out of scope here.
-    # The state transition decides whether to revert or re-apply via
-    # the keep/drop matrix above.
+    tx.reconciliation_state = target_state
+
+    # Balance bookkeeping (PR #247 round 4 P1). Diff source-reportable
+    # against target-reportable; the helper reads the post-mutation
+    # state off the instance, so the state flip above must run first.
     await _apply_balance_for_transition(
         db,
         org_id=org_id,
         tx=tx,
         source_state=source_state,
         target_state=target_state,
+        source_reportable=source_reportable,
     )
-
-    tx.reconciliation_state = target_state
 
     # Counter bookkeeping.
     source_was_pending = source_state in PENDING_STATES
