@@ -21,9 +21,13 @@ vi.mock("@/components/auth/AuthProvider", async () => {
 });
 
 const replaceMock = vi.fn();
+// Per-test search params. Tests can mutate this BEFORE calling
+// ``render`` to seed the page from a specific URL.
+let currentSearchParams = new URLSearchParams();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: replaceMock }),
   usePathname: () => "/admin/users",
+  useSearchParams: () => currentSearchParams,
 }));
 
 const SUPERADMIN = {
@@ -90,6 +94,7 @@ describe("AdminUsersPage", () => {
   beforeEach(() => {
     apiFetchMock.mockReset();
     replaceMock.mockReset();
+    currentSearchParams = new URLSearchParams();
     useAuthMock.mockReturnValue({
       user: SUPERADMIN as never,
       loading: false,
@@ -221,6 +226,64 @@ describe("AdminUsersPage", () => {
           (u) => u.includes("/api/v1/admin/users") && u.includes("role=owner"),
         ),
       ).toBe(true);
+    });
+  });
+
+  // ── URL state contract ────────────────────────────────────────────
+
+  it("seeds filter state from the URL on mount", async () => {
+    // Land the page with a filter URL. The page should render the
+    // chips in that state AND issue the corresponding API call.
+    currentSearchParams = new URLSearchParams("q=ada&status=active&role=owner");
+    apiFetchMock.mockImplementation((url: string) => {
+      if (url.startsWith("/api/v1/admin/orgs")) {
+        return Promise.resolve({ items: [], total: 0 } as never);
+      }
+      return Promise.resolve(SAMPLE_USERS as never);
+    });
+
+    render(<AdminUsersPage />);
+
+    // Search input reflects the seeded ``q``.
+    const searchInput = (await screen.findByLabelText(
+      /search users/i,
+    )) as HTMLInputElement;
+    expect(searchInput.value).toBe("ada");
+
+    // First /admin/users call carries the seeded filters.
+    await waitFor(() => {
+      const calls = apiFetchMock.mock.calls.map((c) => c[0] as string);
+      const userCall = calls.find((u) => u.startsWith("/api/v1/admin/users"));
+      expect(userCall).toBeDefined();
+      expect(userCall).toContain("q=ada");
+      expect(userCall).toContain("status=active");
+      expect(userCall).toContain("role=owner");
+    });
+  });
+
+  it("writes filter changes back to the URL via router.replace", async () => {
+    apiFetchMock.mockImplementation((url: string) => {
+      if (url.startsWith("/api/v1/admin/orgs")) {
+        return Promise.resolve({ items: [], total: 0 } as never);
+      }
+      return Promise.resolve(SAMPLE_USERS as never);
+    });
+
+    render(<AdminUsersPage />);
+    await screen.findByText("Ada Lovelace");
+
+    fireEvent.click(screen.getByRole("button", { name: "admin" }));
+
+    await waitFor(() => {
+      // Some replace call has to carry role=admin in the path.
+      const urls = replaceMock.mock.calls.map((c) => c[0] as string);
+      expect(urls.some((u) => u.includes("role=admin"))).toBe(true);
+      // And every replace call passes scroll: false so the table
+      // doesn't jump on every URL write.
+      for (const call of replaceMock.mock.calls) {
+        const opts = call[1] as { scroll?: boolean } | undefined;
+        if (opts) expect(opts.scroll).toBe(false);
+      }
     });
   });
 });

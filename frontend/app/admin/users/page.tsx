@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import HelpAnchor from "@/components/HelpAnchor";
 import Spinner from "@/components/ui/Spinner";
@@ -20,12 +20,23 @@ import {
 
 // L4.4 cross-org user search list. Mirrors /admin/orgs/page.tsx in
 // shape: header + search input + filter chips + paginated table.
-// Filter behavior:
-// - search bar debounces 300ms.
-// - role / status chips are radio-like (one active at a time).
-// - "Org" filter is a dropdown sourced from /admin/orgs (cap 200).
-// The query string is the source of truth for the filter state when
-// the user navigates away and back; offset resets when filters change.
+//
+// URL state contract:
+//   The query string is the source of truth for filter state. On
+//   mount we read q / org_id / role / status / offset from
+//   ``useSearchParams`` and seed React state from them. Filter
+//   changes are mirrored back to the URL via ``router.replace`` (no
+//   history entry per keystroke). That means:
+//     - refreshing keeps the filters
+//     - the back button restores the previous filter state
+//     - a filtered URL is shareable / linkable
+//   The URL write is debounced through the same 300 ms ``q``
+//   debounce so a keypress sequence does not stomp ``router.replace``
+//   on every character. Other (single-tap) filters update the URL
+//   eagerly.
+//
+// Mounted under a top-level <Suspense> because ``useSearchParams`` is
+// a client boundary in Next 15.
 
 type OrgRef = {
   org_id: number;
@@ -75,21 +86,57 @@ function chipClass(active: boolean): string {
     "inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium transition-colors",
     active
       ? "border-accent bg-accent/10 text-accent"
-      : "border-border bg-bg-elevated text-text-secondary hover:border-border-strong hover:text-text",
+      : "border-border bg-surface text-text-secondary hover:bg-surface-raised hover:border-border hover:text-text-primary",
   ].join(" ");
 }
 
 export default function AdminUsersPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center">
+          <Spinner />
+        </div>
+      }
+    >
+      <AdminUsersPageContent />
+    </Suspense>
+  );
+}
+
+function AdminUsersPageContent() {
   const { user, loading } = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  // Seed filter state from the URL on the FIRST render so a refresh
+  // (or a shared / bookmarked filtered URL) lands the page in the
+  // same state. We rely on these reads being stable across the first
+  // render only; subsequent param changes flow through React state.
+  const initialQ = searchParams.get("q") ?? "";
+  const initialOrgId = (() => {
+    const raw = searchParams.get("org_id");
+    if (raw === null || raw === "") return "" as const;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : ("" as const);
+  })();
+  const initialRole = searchParams.get("role") ?? "";
+  const initialStatus = searchParams.get("status") ?? "";
+  const initialOffset = (() => {
+    const raw = searchParams.get("offset");
+    if (raw === null || raw === "") return 0;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  })();
 
   // Filter state.
-  const [qInput, setQInput] = useState("");
-  const [q, setQ] = useState("");
-  const [orgId, setOrgId] = useState<number | "">("");
-  const [role, setRole] = useState<string>("");
-  const [status, setStatus] = useState<string>("");
-  const [offset, setOffset] = useState(0);
+  const [qInput, setQInput] = useState(initialQ);
+  const [q, setQ] = useState(initialQ);
+  const [orgId, setOrgId] = useState<number | "">(initialOrgId);
+  const [role, setRole] = useState<string>(initialRole);
+  const [status, setStatus] = useState<string>(initialStatus);
+  const [offset, setOffset] = useState(initialOffset);
 
   const [data, setData] = useState<UsersListResponse | null>(null);
   const [orgOptions, setOrgOptions] = useState<OrgPickerOption[]>([]);
@@ -147,6 +194,34 @@ export default function AdminUsersPage() {
       .catch((err) => setError(extractErrorMessage(err, "Failed to load")))
       .finally(() => setFetching(false));
   }, [loading, user, q, orgId, role, status, offset]);
+
+  // Mirror filter state back to the URL. Uses ``router.replace`` so
+  // the back button steps through user-visible state changes, not
+  // every intermediate keystroke. ``q`` is already debounced upstream
+  // (the qInput effect commits to ``q`` after 300 ms); other filters
+  // tap and apply, so they write to the URL eagerly.
+  //
+  // ``scroll: false`` keeps the table position stable across writes;
+  // without it Next 15 scrolls to the top of the page on every
+  // ``router.replace``.
+  useEffect(() => {
+    if (loading || !user || !hasPlatformPermission(user, "users.view")) return;
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (orgId !== "") params.set("org_id", String(orgId));
+    if (role) params.set("role", role);
+    if (status) params.set("status", status);
+    if (offset > 0) params.set("offset", String(offset));
+    const query = params.toString();
+    // Skip the write when the URL already matches. Cheap string
+    // compare; avoids a needless ``router.replace`` (and the React
+    // re-render it triggers) on first mount when state was seeded
+    // from the URL.
+    const current = searchParams.toString();
+    if (query === current) return;
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, user, q, orgId, role, status, offset, pathname, router]);
 
   const filtersActive = useMemo(
     () => Boolean(q || orgId !== "" || role || status),
@@ -277,7 +352,7 @@ export default function AdminUsersPage() {
             <button
               type="button"
               onClick={resetFilters}
-              className="ml-auto text-xs text-text-muted underline hover:text-text"
+              className="ml-auto text-xs text-text-muted underline hover:text-text-primary"
             >
               Clear filters
             </button>
