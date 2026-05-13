@@ -155,6 +155,17 @@ export default function AppShellAddTransactionCta() {
   }
 
   function onMenuKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    // Tab closes the menu so focus doesn't slip into page chrome
+    // (theme toggle, sign-out) while the popover is still visually
+    // open. Returns focus to the chevron so the user can re-open
+    // without hunting for the trigger. Mirrors the WAI-ARIA menu
+    // pattern when the menu is not itself a navigation surface.
+    if (e.key === "Tab") {
+      e.preventDefault();
+      setMenuOpen(false);
+      chevronRef.current?.focus();
+      return;
+    }
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     e.preventDefault();
     const items = Array.from(

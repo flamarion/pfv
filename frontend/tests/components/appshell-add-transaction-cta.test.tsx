@@ -330,6 +330,35 @@ describe("AppShellAddTransactionCta quick-add menu", () => {
     );
   });
 
+  it("Tab inside the menu closes it and returns focus to the chevron (P2 menu-Tab contract)", async () => {
+    setupRefs();
+    await act(async () => {
+      render(<AppShellAddTransactionCta />);
+    });
+    fireEvent.click(screen.getByTestId("appshell-quick-add-menu-toggle"));
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("appshell-quick-add-menu-transaction"),
+      ).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByTestId("appshell-quick-add-menu-transaction"),
+      );
+    });
+    await act(async () => {
+      fireEvent.keyDown(screen.getByTestId("appshell-quick-add-menu"), {
+        key: "Tab",
+      });
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("appshell-quick-add-menu")).toBeNull();
+    });
+    expect(document.activeElement).toBe(
+      screen.getByTestId("appshell-quick-add-menu-toggle"),
+    );
+  });
+
   it("ArrowDown / ArrowUp move focus between menu items", async () => {
     setupRefs();
     await act(async () => {

@@ -83,7 +83,29 @@ export default function TransferForm({
   const [submitting, setSubmitting] = useState(false);
   const [errMsg, setErrMsg] = useState("");
   const descRef = useRef<HTMLInputElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   const submitIntentRef = useRef<"save" | "save-and-add-new">("save");
+
+  /**
+   * Reset the submit-intent ref when native HTML5 validation rejects a
+   * "Save and add new" attempt. Without this, the ref stays at
+   * "save-and-add-new" and the user's next plain Save click would
+   * silently keep the panel open + clear the form (wrong path). The
+   * `invalid` event fires per-field, doesn't bubble by default, so we
+   * attach it in the capture phase on the form element. requestSubmit()
+   * runs validation synchronously and dispatches `invalid` to each
+   * failed control before returning, so the reset happens before any
+   * user-visible state can change.
+   */
+  useEffect(() => {
+    const form = formRef.current;
+    if (!form) return;
+    const onInvalid = () => {
+      submitIntentRef.current = "save";
+    };
+    form.addEventListener("invalid", onInvalid, true);
+    return () => form.removeEventListener("invalid", onInvalid, true);
+  }, []);
 
   // Pick up updated defaults if the parent supplies them after mount
   // (e.g. accounts loaded async). Mirrors TransactionForm's pattern.
@@ -95,6 +117,30 @@ export default function TransferForm({
     // we don't want to overwrite a user's manual selection.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialFromAccountId]);
+
+  /**
+   * Source-change handler that clears the destination if it would collide
+   * with the new source. The destination <select> filters its visible
+   * options to exclude `fromAccountId`, but the controlled `toAccountId`
+   * state is independent of that filter — without this guard a user can
+   * pick source=A, destination=B, then switch source to B, leaving the
+   * controlled state at toAccountId=B. The form would then POST
+   * `from_account_id === to_account_id`, which the server rejects with a
+   * 422 ("Source and destination accounts must be different",
+   * backend/app/services/transaction_service.py:1389). Clearing client-
+   * side keeps the failure surface at HTML5 required-field validation
+   * (a clean re-pick) instead of a network round-trip.
+   *
+   * Mirrors handleAccountChange in app/transactions/page.tsx:816 — the
+   * inline transfer form on /transactions has carried this clear since
+   * the L3.x Transfers feature shipped.
+   */
+  function handleFromAccountChange(id: number | "") {
+    setFromAccountId(id);
+    if (toAccountId !== "" && id !== "" && toAccountId === id) {
+      setToAccountId("");
+    }
+  }
 
   function clearForm() {
     // Keep source account (typical "from one account, multiple legs"
@@ -166,7 +212,7 @@ export default function TransferForm({
   }
 
   return (
-    <form onSubmit={onSubmit} className="space-y-4">
+    <form ref={formRef} onSubmit={onSubmit} className="space-y-4">
       {errMsg && <div className={errorCls}>{errMsg}</div>}
 
       <div>
@@ -178,7 +224,7 @@ export default function TransferForm({
           required
           value={fromAccountId}
           onChange={(e) =>
-            setFromAccountId(
+            handleFromAccountChange(
               e.target.value === "" ? "" : Number(e.target.value),
             )
           }

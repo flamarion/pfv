@@ -180,6 +180,101 @@ describe("TransferForm", () => {
     ).toBe(String(CHECKING.id));
   });
 
+  it("clears the destination when the source is changed to the current destination (P1: prevents from===to submit)", async () => {
+    const apiFetchMock = vi.mocked(apiFetch);
+    apiFetchMock.mockReset();
+    apiFetchMock.mockResolvedValue({} as never);
+
+    render(
+      <TransferForm
+        accounts={[CHECKING, SAVINGS]}
+        categories={[TRANSFER_CAT]}
+        onSaved={() => {}}
+      />,
+    );
+
+    // Source defaults to Checking (is_default). Pick destination = Savings.
+    const toSelect = screen.getByLabelText("To account") as HTMLSelectElement;
+    fireEvent.change(toSelect, { target: { value: String(SAVINGS.id) } });
+    expect(toSelect.value).toBe(String(SAVINGS.id));
+
+    // Now flip source to Savings. The controlled toAccountId must clear.
+    const fromSelect = screen.getByLabelText(
+      "From account",
+    ) as HTMLSelectElement;
+    fireEvent.change(fromSelect, { target: { value: String(SAVINGS.id) } });
+
+    expect(fromSelect.value).toBe(String(SAVINGS.id));
+    // Stale state guard: destination is no longer Savings (would have
+    // produced from===to). Empty value means the form is submit-invalid
+    // because the `required` attribute on the select blocks submission.
+    expect(toSelect.value).toBe("");
+
+    // Sanity: attempting Save with the cleared destination must NOT
+    // post a transfer where from_account_id === to_account_id.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+    });
+    const transferCalls = apiFetchMock.mock.calls.filter(
+      ([url]) => url === "/api/v1/transactions/transfer",
+    );
+    expect(transferCalls).toHaveLength(0);
+  });
+
+  it("resets the submit-intent ref when native HTML5 validation rejects a Save and add new attempt (P2 intent-leak guard)", async () => {
+    const apiFetchMock = vi.mocked(apiFetch);
+    apiFetchMock.mockReset();
+    apiFetchMock.mockResolvedValue({} as never);
+
+    const onSaved = vi.fn();
+    const onTransactionAdded = vi.fn();
+
+    render(
+      <TransferForm
+        accounts={[CHECKING, SAVINGS]}
+        categories={[TRANSFER_CAT]}
+        onSaved={onSaved}
+        onTransactionAdded={onTransactionAdded}
+      />,
+    );
+
+    // Click "Save and add new" with the form invalid (no destination,
+    // no amount). requestSubmit() runs validation, fires `invalid` on
+    // the first failed control, our capture-phase listener resets the
+    // intent ref to "save".
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Save and add new/i }),
+      );
+    });
+    // Confirm no network call happened (validation blocked submit).
+    expect(onTransactionAdded).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+
+    // Now fill the form validly and hit the normal Save button. If the
+    // intent ref leaked we'd see add-new behavior (panel stays open,
+    // form clears). Correct behavior: onSaved fires exactly once.
+    fireEvent.change(screen.getByLabelText("To account"), {
+      target: { value: String(SAVINGS.id) },
+    });
+    fireEvent.change(screen.getByLabelText("Amount"), {
+      target: { value: "50.00" },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+    });
+
+    await waitFor(() => {
+      expect(onSaved).toHaveBeenCalledTimes(1);
+    });
+    // Sanity: only one transfer POST happened.
+    const transferCalls = apiFetchMock.mock.calls.filter(
+      ([url]) => url === "/api/v1/transactions/transfer",
+    );
+    expect(transferCalls).toHaveLength(1);
+  });
+
   it("omits category_id from the request when no override is picked (server applies the Transfer default)", async () => {
     const apiFetchMock = vi.mocked(apiFetch);
     apiFetchMock.mockReset();
