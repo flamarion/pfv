@@ -168,13 +168,14 @@ export default function OnboardingPageBody() {
       goNext();
     } catch (err) {
       // 409 from the backend is expected when the org already has
-      // data. Render a non-blocking note so the user can continue.
+      // data. Surface a non-blocking note and let the user advance
+      // themselves rather than yanking them off the step before they
+      // read why we declined.
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes("org_has_data") || message.includes("409")) {
         setSeedNote(
           "Your account already has data, so we skipped the sample set.",
         );
-        goNext();
       } else {
         setError(
           "We could not load the sample data. You can still continue.",

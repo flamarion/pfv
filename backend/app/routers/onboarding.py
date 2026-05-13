@@ -98,8 +98,18 @@ async def seed_demo(
     transactions, or with 409 ``demo_already_applied`` when the demo
     sentinel category is already present.
     """
+    # Snapshot the audit-relevant fields BEFORE any commit or rollback.
+    # SQLAlchemy expires ORM attributes after commit / rollback by default
+    # and the audit emit happens AFTER that boundary. Touching
+    # ``current_user.id`` on the failure path would otherwise trigger a
+    # lazy reload that crashes with MissingGreenlet because the request
+    # session is no longer green-thread safe by that point.
+    actor_user_id = current_user.id
+    actor_email = current_user.email
+    org_id = current_user.org_id
+
     try:
-        result = await seed_org(db, current_user.org_id)
+        result = await seed_org(db, org_id)
         await db.commit()
     except DemoSeedAlreadyApplied as exc:
         await db.rollback()
@@ -108,9 +118,9 @@ async def seed_demo(
         await audit_service.record_audit_event(
             session_factory,
             event_type="onboarding.seed_demo.refused",
-            actor_user_id=current_user.id,
-            actor_email=current_user.email,
-            target_org_id=current_user.org_id,
+            actor_user_id=actor_user_id,
+            actor_email=actor_email,
+            target_org_id=org_id,
             target_org_name=None,
             request_id=_request_id(),
             ip_address=get_client_ip(request),
@@ -125,9 +135,9 @@ async def seed_demo(
     await audit_service.record_audit_event(
         session_factory,
         event_type="onboarding.seed_demo.applied",
-        actor_user_id=current_user.id,
-        actor_email=current_user.email,
-        target_org_id=current_user.org_id,
+        actor_user_id=actor_user_id,
+        actor_email=actor_email,
+        target_org_id=org_id,
         target_org_name=None,
         request_id=_request_id(),
         ip_address=get_client_ip(request),

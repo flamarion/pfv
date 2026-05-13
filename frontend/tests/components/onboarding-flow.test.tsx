@@ -155,8 +155,13 @@ describe("OnboardingPageBody", () => {
     );
     fireEvent.click(screen.getByTestId("onboarding-accept-seed"));
     await waitFor(() => {
-      // We end up at step 4 (tour) and the note is visible somewhere
-      // in the doc, OR we are still on the demo step with the note.
+      // The 409 path keeps the user on the demo step with the soft
+      // note visible. They can skip forward themselves once they have
+      // read why we declined.
+      expect(screen.getByTestId("onboarding-seed-note")).toBeInTheDocument();
+      expect(
+        screen.getByText(/your account already has data/i),
+      ).toBeInTheDocument();
       expect(replaceMock).not.toHaveBeenCalledWith(
         expect.stringMatching(/^\/dashboard/),
       );

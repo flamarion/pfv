@@ -1,7 +1,7 @@
 """Add users.onboarded_at + backfill existing users.
 
-Revision ID: 041_users_onboarded_at
-Revises: 040_users_email_case_insensitive
+Revision ID: 042_users_onboarded_at
+Revises: 041_opening_balance
 Create Date: 2026-05-12
 
 Adds ``users.onboarded_at TIMESTAMP NULL``. Backfills every existing
@@ -21,8 +21,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision = "041_users_onboarded_at"
-down_revision = "040_users_email_case_insensitive"
+revision = "042_users_onboarded_at"
+down_revision = "041_opening_balance"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
