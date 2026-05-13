@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import AppShell from "@/components/AppShell";
+import HelpAnchor from "@/components/HelpAnchor";
 import Spinner from "@/components/ui/Spinner";
 import ConfirmModal from "@/components/ui/ConfirmModal";
 import { useAuth } from "@/components/auth/AuthProvider";
@@ -90,9 +91,21 @@ export default function RecurringPage() {
     <AppShell>
       <div className="mb-8 flex items-center justify-between">
         <h1 className={`${pageTitle} mb-0`}>Recurring Transactions</h1>
-        <button onClick={handleGenerate} className={btnSecondary}>
-          Generate Due
-        </button>
+        {/* Generate Due cluster: the button materializes pending
+            occurrences whose next_due_date has already passed. The
+            HelpAnchor next to it deep-links to the /docs#recurring
+            section so the user can read the full explanation without
+            losing context (opens in a new tab). */}
+        <div className="flex items-center gap-1">
+          <button onClick={handleGenerate} className={btnSecondary}>
+            Generate Due
+          </button>
+          <HelpAnchor
+            section="recurring"
+            label="Generate due"
+            variant="inline-title"
+          />
+        </div>
       </div>
 
       {error && <div className={`mb-6 ${errorCls}`}>{error}</div>}
