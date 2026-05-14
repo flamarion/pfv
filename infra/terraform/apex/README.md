@@ -179,9 +179,11 @@ targets; apex has no such reuse story.
     - `A` and `AAAA` ALIAS writes are allowed ONLY on
       `thebetterdecision.com` and `www.thebetterdecision.com` (the
       apex / www CloudFront ALIASes).
-    - `CNAME` writes are allowed ONLY on names matching
-      `_*.thebetterdecision.com` or `_*.www.thebetterdecision.com` (the
-      ACM validation pattern).
+    - `CNAME` writes are allowed ONLY on the exact ACM validation
+      names derived from `aws_acm_certificate.apex.domain_validation_options`,
+      normalized to lowercase and no trailing dot. AWS reuses these
+      names across cert renewals, so the policy stays stable; on a SAN
+      change or cert recreate the policy re-derives automatically.
   Any other record type or any other name in the zone is **IAM-blocked**,
   so a leaked role token cannot rewrite MX records, NS delegations,
   arbitrary subdomain A records, or any other zone content.
