@@ -163,12 +163,19 @@ targets; apex has no such reuse story.
     scope for PR-A.
 - The **TFC apex provisioner role** can manage the apex bucket and
   distribution, ACM certs in `us-east-1`, the two IAM OIDC providers,
-  and its own + the GH Actions role. Route 53 is **read-only** with the
-  single exception of ACM validation **CNAME** writes, which are scoped
-  to the apex hosted zone AND restricted by an IAM condition on
-  `route53:ChangeResourceRecordSetsRecordTypes` to the `CNAME` type only.
-  Apex `A` record writes are **IAM-blocked**, not just code-discipline
-  blocked. PR-D widens the IAM condition to add `A` at cutover.
+  and its own + the GH Actions role. Route 53 writes are split into two
+  narrowly-scoped IAM statements, each pairing
+  `route53:ChangeResourceRecordSetsRecordTypes` with
+  `route53:ChangeResourceRecordSetsNormalizedRecordNames`:
+    - `A` and `AAAA` ALIAS writes are allowed ONLY on
+      `thebetterdecision.com` and `www.thebetterdecision.com` (the
+      apex / www CloudFront ALIASes).
+    - `CNAME` writes are allowed ONLY on names matching
+      `_*.thebetterdecision.com` or `_*.www.thebetterdecision.com` (the
+      ACM validation pattern).
+  Any other record type or any other name in the zone is **IAM-blocked**,
+  so a leaked role token cannot rewrite MX records, NS delegations,
+  arbitrary subdomain A records, or any other zone content.
 - The **S3 bucket** has all four public-access-block flags ON. Read
   access is granted exclusively to the apex CloudFront distribution
   service-principal, scoped by `SourceArn` condition.
