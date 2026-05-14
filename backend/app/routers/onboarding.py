@@ -1,6 +1,6 @@
 """Onboarding endpoints (L3.3 first-run wizard).
 
-Two endpoints, both auth-required, both scoped to the calling user
+Three endpoints, all auth-required, all scoped to the calling user
 and their org:
 
 - ``POST /api/v1/users/me/onboarding/complete``
@@ -13,6 +13,12 @@ and their org:
   Refuses with 409 ``org_has_data`` when the org already has user
   transactions OR the demo sentinel category is already present.
   Audit-logged on success and on refusal.
+
+- ``POST /api/v1/users/me/onboarding/restart-tour``
+  Clears ``users.onboarded_at`` so the user can re-run the first-run
+  wizard / tour. Idempotent (NULL stays NULL on re-call). Per-user, so
+  no other org members are affected. Audit event
+  ``onboarding.tour.restarted`` on every call.
 
 Org isolation: the service receives ``current_user.org_id`` directly;
 no path or body parameter can override which org gets seeded.
@@ -52,6 +58,10 @@ class SeedDemoResponse(BaseModel):
     accounts_created: int
     transactions_created: int
     categories_created: int
+
+
+class RestartTourResponse(BaseModel):
+    onboarded_at: Optional[str]
 
 
 def _request_id() -> Optional[str]:
@@ -154,3 +164,45 @@ async def seed_demo(
         transactions_created=result.transactions_created,
         categories_created=result.categories_created,
     )
+
+
+@router.post("/restart-tour", response_model=RestartTourResponse)
+@limiter.limit("10/hour")
+async def restart_tour(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
+):
+    """Clear ``users.onboarded_at`` so the caller can re-run the tour.
+
+    Idempotent: calling twice leaves the column NULL both times and
+    audits both calls. Per-user — only the caller's row is touched,
+    other members of the same org are unaffected.
+    """
+    # Pre-snapshot the audit fields so a lazy reload after commit
+    # cannot crash with MissingGreenlet. Same pattern as seed_demo.
+    actor_user_id = current_user.id
+    actor_email = current_user.email
+    org_id = current_user.org_id
+
+    user = (
+        await db.execute(select(User).where(User.id == current_user.id))
+    ).scalar_one()
+    user.onboarded_at = None
+    await db.commit()
+
+    await audit_service.record_audit_event(
+        session_factory,
+        event_type="onboarding.tour.restarted",
+        actor_user_id=actor_user_id,
+        actor_email=actor_email,
+        target_org_id=org_id,
+        target_org_name=None,
+        request_id=_request_id(),
+        ip_address=get_client_ip(request),
+        outcome="success",
+        detail=None,
+    )
+
+    return RestartTourResponse(onboarded_at=None)

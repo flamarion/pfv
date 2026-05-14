@@ -6,6 +6,8 @@ Covers:
 - ``POST /onboarding/seed-demo`` seeds and returns counts.
 - ``/seed-demo`` returns 409 when the org already has data.
 - ``/seed-demo`` writes audit rows on success and refusal.
+- ``POST /onboarding/restart-tour`` clears ``onboarded_at`` and audits.
+- ``/restart-tour`` is idempotent (NULL → NULL is fine).
 """
 from __future__ import annotations
 
@@ -231,3 +233,52 @@ async def test_seed_demo_409_on_second_call(session_factory):
     assert first.status_code == 200
     assert second.status_code == 409
     assert second.json()["detail"] == "org_has_data"
+
+
+@pytest.mark.asyncio
+async def test_restart_tour_clears_onboarded_at(session_factory):
+    seeds = await _seed_user(session_factory)
+    # First complete onboarding so onboarded_at is non-null.
+    async with session_factory() as db:
+        u = (
+            await db.execute(select(User).where(User.id == seeds["user_id"]))
+        ).scalar_one()
+        u.onboarded_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        await db.commit()
+
+    app = make_app(session_factory, seeds["user_id"])
+    with TestClient(app) as client:
+        res = client.post("/api/v1/users/me/onboarding/restart-tour")
+    assert res.status_code == 200, res.text
+    assert res.json()["onboarded_at"] is None
+
+    async with session_factory() as db:
+        u = (
+            await db.execute(select(User).where(User.id == seeds["user_id"]))
+        ).scalar_one()
+    assert u.onboarded_at is None
+
+    async with session_factory() as db:
+        rows = (await db.execute(select(AuditEvent))).scalars().all()
+        types = [r.event_type for r in rows]
+        assert "onboarding.tour.restarted" in types
+
+
+@pytest.mark.asyncio
+async def test_restart_tour_is_idempotent(session_factory):
+    """Calling restart-tour twice in a row stays at NULL and audits both."""
+    seeds = await _seed_user(session_factory)
+    app = make_app(session_factory, seeds["user_id"])
+    with TestClient(app) as client:
+        first = client.post("/api/v1/users/me/onboarding/restart-tour")
+        second = client.post("/api/v1/users/me/onboarding/restart-tour")
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["onboarded_at"] is None
+    assert second.json()["onboarded_at"] is None
+
+    async with session_factory() as db:
+        rows = (await db.execute(select(AuditEvent))).scalars().all()
+        restarted = [r for r in rows if r.event_type == "onboarding.tour.restarted"]
+    # Both calls produce an audit row.
+    assert len(restarted) == 2
