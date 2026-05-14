@@ -2,6 +2,7 @@ import re
 import secrets
 import hmac as _hmac
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from urllib.parse import urlencode
 
 import httpx
@@ -722,6 +723,7 @@ async def _record_google_callback_failure(
     reason: str,
     actor_email: str | None = None,
     event_type: str = "auth.google.callback.failed",
+    detail_extra: dict[str, Any] | None = None,
 ) -> None:
     """Persist a Google SSO callback failure as an audit row.
 
@@ -731,8 +733,16 @@ async def _record_google_callback_failure(
     userinfo call lands. ``audit_events.actor_email`` is non-nullable
     so we fall back to an empty string when Google hasn't returned
     one yet.
+
+    ``detail_extra`` lets the caller attach extra fields (e.g., the
+    raw ``google_error`` and ``google_error_description`` Google
+    returned on a cancelled consent) without forcing every call site
+    to construct the full detail dict.
     """
     request_id = structlog.contextvars.get_contextvars().get("request_id")
+    detail: dict[str, Any] = {"reason": reason}
+    if detail_extra:
+        detail.update(detail_extra)
     await audit_service.record_audit_event(
         session_factory,
         event_type=event_type,
@@ -743,7 +753,7 @@ async def _record_google_callback_failure(
         request_id=request_id,
         ip_address=get_client_ip(request),
         outcome="failure",
-        detail={"reason": reason},
+        detail=detail,
     )
 
 
@@ -1108,8 +1118,10 @@ async def google_login(response: Response):
 @router.get("/google/callback")
 async def google_callback(
     request: Request,
-    code: str,
-    state: str,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
     db: AsyncSession = Depends(get_db),
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
     oauth_state: str | None = Cookie(default=None),
@@ -1121,6 +1133,14 @@ async def google_callback(
     object. FastAPI does not merge cookies set on an injected Response parameter
     into a directly-returned Response — they would be silently dropped, which
     is what previously broke the refresh-cookie round-trip for SSO logins.
+
+    ``code`` and ``state`` are typed Optional because Google calls us back
+    without a ``code`` in two important cases: (1) the user clicked
+    Cancel/Back on the consent screen (``?error=access_denied``), and
+    (2) any other provider-side failure (``?error=server_error`` etc.).
+    Declaring them required would 422 before we reach the friendly
+    redirect, leaving the user staring at App Platform's generic error
+    page instead of /login with banner copy.
     """
     # _validate_google_config stays a 501 raise rather than a redirect:
     # missing client_id/client_secret is operator misconfiguration, not
@@ -1128,12 +1148,41 @@ async def google_callback(
     # the alert-worthy signal in DO logs / dashboards.
     _validate_google_config()
 
+    # ── Provider-side failure branch ─────────────────────────────────
+    # If Google attached ``?error=...`` (the standard OAuth2 error
+    # response), the user-facing flow already failed at the consent
+    # screen. There is no code to exchange. Skip state validation
+    # entirely (we want a friendly message even if the cookie also
+    # got nuked) and route to /login with the matching banner code.
+    if error is not None:
+        google_reason = "cancelled" if error == "access_denied" else "provider_error"
+        await _record_google_callback_failure(
+            session_factory,
+            request=request,
+            reason=google_reason,
+            detail_extra={
+                "google_error": error,
+                "google_error_description": error_description,
+            },
+        )
+        return _google_error_redirect(google_reason)
+
+    # Malformed callback: neither a code nor an error. Surface to the
+    # user as ``token`` so the existing banner copy covers it, but
+    # audit the specific reason (``missing_code``) so ops can tell it
+    # apart from a real token exchange failure.
+    if code is None:
+        await _record_google_callback_failure(
+            session_factory, request=request, reason="missing_code"
+        )
+        return _google_error_redirect("token")
+
     # Validate CSRF state. The cookie miss case is the common one in
     # production — DO App Platform was wrapping the 400 in its generic
     # "Error / check logs" splash, so users saw a broken-app screen
     # instead of "your sign-in expired, try again". Redirect to /login
     # with ?sso_error=state so the frontend can render the right copy.
-    if not oauth_state or oauth_state != state:
+    if not oauth_state or not state or oauth_state != state:
         await _record_google_callback_failure(
             session_factory, request=request, reason="state"
         )
@@ -1399,8 +1448,10 @@ async def sso_stepup_initiate(
 @router.get("/sso-stepup/callback")
 async def sso_stepup_callback(
     request: Request,
-    code: str,
-    state: str,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
     db: AsyncSession = Depends(get_db),
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
     oauth_state: str | None = Cookie(default=None),
@@ -1423,6 +1474,10 @@ async def sso_stepup_callback(
     `users` row and redirects back to /settings with the token in the
     URL fragment. Like the SSO login flow, fragments stay client-side
     (not sent to servers, not in access logs).
+
+    ``code`` and ``state`` are typed Optional so the user-cancelled
+    consent (``?error=access_denied``) and other provider-side error
+    branches reach our friendly redirect instead of FastAPI's 422.
     """
     # Same rationale as in google_callback: a missing client_id/secret
     # is operator misconfiguration, not user-recoverable. Keep as a 501.
@@ -1431,13 +1486,18 @@ async def sso_stepup_callback(
     # Pre-parse the return target so we can redirect to the right page
     # even when state itself is broken. Falls back to the default
     # /settings landing when the shape doesn't parse.
-    def _resolve_return_path(raw_state: str) -> str:
+    def _resolve_return_path(raw_state: str | None) -> str:
         parts = (raw_state or "").split(":")
         if len(parts) == 4 and parts[3] in _STEPUP_RETURN_TARGETS:
             return _STEPUP_RETURN_TARGETS[parts[3]]
         return _STEPUP_RETURN_TARGETS[_STEPUP_DEFAULT_TARGET]
 
-    async def _stepup_failure(reason: str, *, actor_email: str | None = None) -> RedirectResponse:
+    async def _stepup_failure(
+        reason: str,
+        *,
+        actor_email: str | None = None,
+        detail_extra: dict[str, Any] | None = None,
+    ) -> RedirectResponse:
         """Record the audit row and build the friendly redirect."""
         return_path = _resolve_return_path(state)
         await _record_google_callback_failure(
@@ -1446,6 +1506,7 @@ async def sso_stepup_callback(
             reason=reason,
             actor_email=actor_email,
             event_type="auth.google.sso_stepup.callback.failed",
+            detail_extra=detail_extra,
         )
         resp = RedirectResponse(
             url=f"{app_settings.app_url}{return_path}?sso_stepup_error={reason}",
@@ -1454,7 +1515,41 @@ async def sso_stepup_callback(
         resp.delete_cookie("oauth_state", path="/api/v1/auth/sso-stepup")
         return resp
 
-    if not oauth_state or oauth_state != state:
+    # ── Provider-side failure branch ─────────────────────────────────
+    # Google attached ``?error=...`` — the user cancelled at consent or
+    # the provider returned its own error. There is no code to exchange.
+    # Surface the friendly redirect regardless of state validity.
+    if error is not None:
+        stepup_reason = "cancelled" if error == "access_denied" else "provider_error"
+        return await _stepup_failure(
+            stepup_reason,
+            detail_extra={
+                "google_error": error,
+                "google_error_description": error_description,
+            },
+        )
+
+    # Malformed callback: neither a code nor an error. Surface the
+    # ``token`` UI code (matches the existing copy) but audit the
+    # specific ``missing_code`` reason so ops can tell it apart from a
+    # real token-exchange failure. The frontend banner copy only keys
+    # off the URL ``sso_stepup_error=token`` value.
+    if code is None:
+        await _record_google_callback_failure(
+            session_factory,
+            request=request,
+            reason="missing_code",
+            event_type="auth.google.sso_stepup.callback.failed",
+        )
+        return_path = _resolve_return_path(state)
+        resp = RedirectResponse(
+            url=f"{app_settings.app_url}{return_path}?sso_stepup_error=token",
+            status_code=307,
+        )
+        resp.delete_cookie("oauth_state", path="/api/v1/auth/sso-stepup")
+        return resp
+
+    if not oauth_state or not state or oauth_state != state:
         return await _stepup_failure("state")
 
     # State binds the redemption to a specific user_id chosen at

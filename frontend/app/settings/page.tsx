@@ -6,6 +6,7 @@ import { FormEvent, useEffect, useState } from "react";
 import SettingsLayout from "@/components/SettingsLayout";
 import PasswordInput from "@/components/ui/PasswordInput";
 import { useAuth } from "@/components/auth/AuthProvider";
+import SsoStepupErrorBanner from "@/components/auth/SsoStepupErrorBanner";
 import { apiFetch, extractErrorMessage } from "@/lib/api";
 import { input, label, btnPrimary, btnSecondary, card, cardTitle, error as errorCls, success as successCls } from "@/lib/styles";
 import type { User } from "@/lib/types";
@@ -24,6 +25,10 @@ const SSO_STEPUP_ERROR_COPY: Record<string, string> = {
     "Your Google account isn't verified, so we can't use it to confirm this change.",
   email_mismatch:
     "The Google account you signed in with doesn't match this profile. Use the same Google account.",
+  cancelled:
+    "You cancelled the Google verification. Try again whenever you're ready.",
+  provider_error:
+    "Google returned an error during verification. Try again.",
 };
 const SSO_STEPUP_ERROR_FALLBACK = "Google verification didn't complete. Try again.";
 
@@ -192,36 +197,17 @@ export default function SettingsProfilePage() {
     <SettingsLayout activeTab="/settings">
       <div className="max-w-lg space-y-6">
         {stepupErrorVisible && stepupErrorCode && (
-          <div
-            className={errorCls}
-            role="alert"
-            data-testid="sso-stepup-error-banner"
-          >
-            <p>
-              {SSO_STEPUP_ERROR_COPY[stepupErrorCode] ??
-                SSO_STEPUP_ERROR_FALLBACK}
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  clearStepupErrorFromUrl();
-                  handleVerifyWithGoogle();
-                }}
-                disabled={stepupBusy}
-                className={`${btnPrimary} text-xs`}
-              >
-                {stepupBusy ? "Redirecting..." : "Try again with Google"}
-              </button>
-              <button
-                type="button"
-                onClick={clearStepupErrorFromUrl}
-                className={`${btnSecondary} text-xs`}
-              >
-                Dismiss
-              </button>
-            </div>
-          </div>
+          <SsoStepupErrorBanner
+            errorCode={stepupErrorCode}
+            copyByCode={SSO_STEPUP_ERROR_COPY}
+            fallbackCopy={SSO_STEPUP_ERROR_FALLBACK}
+            busy={stepupBusy}
+            onRetry={() => {
+              clearStepupErrorFromUrl();
+              handleVerifyWithGoogle();
+            }}
+            onDismiss={clearStepupErrorFromUrl}
+          />
         )}
         <div className={`${card} p-6`}>
           <div className="flex items-center gap-4">

@@ -184,6 +184,11 @@ describe("LoginPageBody — SSO error banner", () => {
     { code: "unverified", needle: /isn't verified/i },
     { code: "deactivated", needle: /account is deactivated/i },
     { code: "no_email", needle: /didn't return an email/i },
+    { code: "cancelled", needle: /You cancelled the Google sign-in/i },
+    {
+      code: "provider_error",
+      needle: /Google returned an error during sign-in/i,
+    },
   ];
 
   it.each(cases)("renders friendly copy for ?sso_error=$code", ({ code, needle }) => {
@@ -203,18 +208,52 @@ describe("LoginPageBody — SSO error banner", () => {
     expect(banner.textContent).toMatch(/didn't complete\. Try again/i);
   });
 
-  it("Try again button calls the existing /api/v1/auth/google flow", async () => {
-    searchParamsMock.mockReturnValue(new URLSearchParams("sso_error=state"));
-    apiFetchMock.mockResolvedValue({
-      redirect_url: "https://accounts.google.com/fake",
-    } as never);
-
-    render(<LoginPageBody />);
-    const retryBtn = screen.getByRole("button", { name: /Try again with Google/i });
-    fireEvent.click(retryBtn);
-
-    await waitFor(() => {
-      expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/auth/google");
+  it("Try again button calls the existing /api/v1/auth/google flow (no jsdom navigation warning)", async () => {
+    // Without this stub the handleGoogleLogin handler ends with
+    // `window.location.href = data.redirect_url`, which jsdom flags
+    // as "Not implemented: navigation" on stderr. The test still
+    // passes but the warning pollutes CI logs (Finding 3). Define a
+    // spyable href setter so the assignment is a no-op in tests.
+    const original = window.location;
+    const hrefSetter = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: {
+        ...original,
+        assign: vi.fn(),
+        get href() {
+          return original.href;
+        },
+        set href(value: string) {
+          hrefSetter(value);
+        },
+      },
     });
+    try {
+      searchParamsMock.mockReturnValue(new URLSearchParams("sso_error=state"));
+      apiFetchMock.mockResolvedValue({
+        redirect_url: "https://accounts.google.com/fake",
+      } as never);
+
+      render(<LoginPageBody />);
+      const retryBtn = screen.getByRole("button", { name: /Try again with Google/i });
+      fireEvent.click(retryBtn);
+
+      await waitFor(() => {
+        expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/auth/google");
+      });
+      // The retry should set href to Google's URL. This also confirms
+      // the stub intercepted the assignment (so jsdom never saw it).
+      await waitFor(() => {
+        expect(hrefSetter).toHaveBeenCalledWith(
+          "https://accounts.google.com/fake",
+        );
+      });
+    } finally {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: original,
+      });
+    }
   });
 });

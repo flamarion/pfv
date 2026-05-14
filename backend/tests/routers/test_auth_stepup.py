@@ -31,10 +31,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from sqlalchemy import select
+
 from app.config import settings as app_settings
 from app.database import get_db
-from app.deps import get_current_user
+from app.deps import get_current_user, get_session_factory
 from app.models import Base
+from app.models.audit_event import AuditEvent
 from app.models.user import Organization, Role, User
 from app.routers import auth as auth_module
 from app.routers.auth import router as auth_router
@@ -97,7 +100,15 @@ def _make_app(session_factory, current_user_id: int | None):
         async with session_factory() as session:
             yield session
 
+    async def override_session_factory():
+        # Audit writes use this independent factory so failure rows
+        # commit in their own txn even when the business txn rolled
+        # back. Wire it at the in-memory factory so the test can
+        # query the AuditEvent rows directly.
+        return session_factory
+
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_session_factory] = override_session_factory
 
     if current_user_id is not None:
         async def override_current_user() -> User:
@@ -110,6 +121,16 @@ def _make_app(session_factory, current_user_id: int | None):
 
     app.include_router(auth_router)
     return app
+
+
+async def _stepup_failure_rows(factory) -> list[AuditEvent]:
+    async with factory() as db:
+        result = await db.execute(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "auth.google.sso_stepup.callback.failed"
+            )
+        )
+        return list(result.scalars().all())
 
 
 # ---------- helpers for the callback success path ---------------------------
@@ -455,3 +476,126 @@ async def test_callback_with_empty_state_returns_friendly_redirect(
         user = await db.get(User, user_id)
         assert user is not None
         assert user.stepup_token is None
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — Google cancel / missing code / provider error branches.
+# These bypass FastAPI's old 422 by accepting code/state as Optional.
+# The redirect target derives from `return_to` in state, so we run
+# each branch for both /settings (default) and /settings/security.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stepup_callback_user_cancelled_redirects_to_settings(
+    session_factory, google_config
+):
+    """User cancelled at Google. Default `return_to` (no /security)
+    in state → friendly /settings redirect with banner-ready code."""
+    user_id = await _seed_user(session_factory)
+    app = _make_app(session_factory, user_id)
+    state = f"stepup:{user_id}:nonce:settings"
+
+    with TestClient(app) as client:
+        # No oauth_state cookie — we want the cancelled branch to
+        # surface a friendly redirect regardless of state validity.
+        res = client.get(
+            "/api/v1/auth/sso-stepup/callback",
+            params={
+                "error": "access_denied",
+                "state": state,
+                "error_description": "user denied consent",
+            },
+            follow_redirects=False,
+        )
+
+    assert res.status_code == 307, res.text
+    location = res.headers.get("location", "")
+    assert location.endswith("/settings?sso_stepup_error=cancelled"), location
+
+    rows = await _stepup_failure_rows(session_factory)
+    assert len(rows) == 1
+    assert rows[0].detail["reason"] == "cancelled"
+    assert rows[0].detail["google_error"] == "access_denied"
+
+
+@pytest.mark.asyncio
+async def test_stepup_callback_user_cancelled_redirects_to_security(
+    session_factory, google_config
+):
+    """Same cancel branch, but step-up initiated from /settings/security
+    (`return_to: "security"`). Redirect must land on the security page,
+    not /settings."""
+    user_id = await _seed_user(session_factory)
+    app = _make_app(session_factory, user_id)
+    state = f"stepup:{user_id}:nonce:security"
+
+    with TestClient(app) as client:
+        res = client.get(
+            "/api/v1/auth/sso-stepup/callback",
+            params={"error": "access_denied", "state": state},
+            follow_redirects=False,
+        )
+
+    assert res.status_code == 307, res.text
+    location = res.headers.get("location", "")
+    assert location.endswith(
+        "/settings/security?sso_stepup_error=cancelled"
+    ), location
+
+
+@pytest.mark.asyncio
+async def test_stepup_callback_provider_error_redirects_with_provider_error_code(
+    session_factory, google_config
+):
+    """Non-cancel error (e.g. server_error) maps to provider_error so
+    the banner copy reflects "Google had a problem", not "you cancelled"."""
+    user_id = await _seed_user(session_factory)
+    app = _make_app(session_factory, user_id)
+    state = f"stepup:{user_id}:nonce:security"
+
+    with TestClient(app) as client:
+        res = client.get(
+            "/api/v1/auth/sso-stepup/callback",
+            params={"error": "server_error", "state": state},
+            follow_redirects=False,
+        )
+
+    assert res.status_code == 307, res.text
+    location = res.headers.get("location", "")
+    assert location.endswith(
+        "/settings/security?sso_stepup_error=provider_error"
+    ), location
+
+    rows = await _stepup_failure_rows(session_factory)
+    assert len(rows) == 1
+    assert rows[0].detail["reason"] == "provider_error"
+    assert rows[0].detail["google_error"] == "server_error"
+
+
+@pytest.mark.asyncio
+async def test_stepup_callback_missing_code_and_error_redirects_with_token_code(
+    session_factory, google_config
+):
+    """Malformed callback: no code, no error. Reuse the existing
+    "token" UI copy but audit the specific `missing_code` reason."""
+    user_id = await _seed_user(session_factory)
+    app = _make_app(session_factory, user_id)
+    state = f"stepup:{user_id}:nonce:security"
+
+    with TestClient(app) as client:
+        res = client.get(
+            "/api/v1/auth/sso-stepup/callback",
+            params={"state": state},
+            follow_redirects=False,
+        )
+
+    assert res.status_code == 307, res.text
+    location = res.headers.get("location", "")
+    assert location.endswith(
+        "/settings/security?sso_stepup_error=token"
+    ), location
+
+    rows = await _stepup_failure_rows(session_factory)
+    assert len(rows) == 1
+    assert rows[0].detail == {"reason": "missing_code"}

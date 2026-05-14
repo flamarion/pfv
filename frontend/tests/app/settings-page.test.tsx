@@ -123,6 +123,30 @@ describe("Settings page — email change step-up token state hygiene", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders cancelled copy when ?sso_stepup_error=cancelled", () => {
+    mockUser(false);
+    vi.spyOn(nextNavigation, "useSearchParams").mockReturnValue(
+      new URLSearchParams("sso_stepup_error=cancelled") as never,
+    );
+    render(<SettingsProfilePage />);
+    const banner = screen.getByTestId("sso-stepup-error-banner");
+    expect(banner.textContent).toMatch(
+      /You cancelled the Google verification/i,
+    );
+  });
+
+  it("renders provider_error copy when ?sso_stepup_error=provider_error", () => {
+    mockUser(false);
+    vi.spyOn(nextNavigation, "useSearchParams").mockReturnValue(
+      new URLSearchParams("sso_stepup_error=provider_error") as never,
+    );
+    render(<SettingsProfilePage />);
+    const banner = screen.getByTestId("sso-stepup-error-banner");
+    expect(banner.textContent).toMatch(
+      /Google returned an error during verification/i,
+    );
+  });
+
   it("preserves stepupToken when the error is unrelated to step-up (e.g., email taken)", async () => {
     mockUser(false);
     window.location.hash = "#stepup_token=fresh-token";

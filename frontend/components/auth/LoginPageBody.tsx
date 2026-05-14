@@ -28,6 +28,10 @@ const SSO_ERROR_COPY: Record<string, string> = {
   deactivated:
     "This account is deactivated. Contact support if this is unexpected.",
   no_email: "Google didn't return an email for this account.",
+  cancelled:
+    "You cancelled the Google sign-in. Try again whenever you're ready.",
+  provider_error:
+    "Google returned an error during sign-in. Try again, or sign in with a password.",
 };
 const SSO_ERROR_FALLBACK = "Google sign-in didn't complete. Try again.";
 

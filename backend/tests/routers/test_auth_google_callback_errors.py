@@ -503,6 +503,95 @@ async def test_stepup_expired_oauth_state_cookie_redirects_with_state_code(
     assert rows[0].detail == {"reason": "state"}
 
 
+# ── cancelled / provider_error / missing_code ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_google_callback_user_cancelled_redirects_with_cancelled_code(
+    session_factory, google_config
+) -> None:
+    """User clicked Cancel/Back on Google's consent screen. Google
+    redirects with ``?error=access_denied&state=<csrf>`` and no
+    ``code``. Pre-fix the missing ``code`` required-query 422'd before
+    our handler ran, leaving the user on App Platform's generic error
+    page. Now we route to /login?sso_error=cancelled with audit row."""
+    app = _make_app(session_factory)
+    with TestClient(app) as client:
+        # No cookie set is fine — we want a friendly message even if
+        # the state cookie also got nuked.
+        res = client.get(
+            "/api/v1/auth/google/callback",
+            params={
+                "error": "access_denied",
+                "state": "some-state-value",
+                "error_description": "The user cancelled the request",
+            },
+            follow_redirects=False,
+        )
+
+    assert res.status_code == 307, res.text
+    assert (
+        res.headers.get("location") == "http://localhost/login?sso_error=cancelled"
+    )
+
+    rows = await _callback_failure_rows(session_factory)
+    assert len(rows) == 1
+    assert rows[0].detail["reason"] == "cancelled"
+    assert rows[0].detail["google_error"] == "access_denied"
+    assert rows[0].detail["google_error_description"] == "The user cancelled the request"
+
+
+@pytest.mark.asyncio
+async def test_google_callback_provider_error_redirects_with_provider_error_code(
+    session_factory, google_config
+) -> None:
+    """Google returned a non-access_denied error (e.g. server_error,
+    invalid_request). Map to ``provider_error`` so the banner copy
+    distinguishes the cancelled case from a provider issue."""
+    app = _make_app(session_factory)
+    with TestClient(app) as client:
+        res = client.get(
+            "/api/v1/auth/google/callback",
+            params={"error": "server_error", "state": "some-state-value"},
+            follow_redirects=False,
+        )
+
+    assert res.status_code == 307, res.text
+    assert (
+        res.headers.get("location")
+        == "http://localhost/login?sso_error=provider_error"
+    )
+
+    rows = await _callback_failure_rows(session_factory)
+    assert len(rows) == 1
+    assert rows[0].detail["reason"] == "provider_error"
+    assert rows[0].detail["google_error"] == "server_error"
+
+
+@pytest.mark.asyncio
+async def test_google_callback_missing_code_and_error_redirects_with_token_code(
+    session_factory, google_config
+) -> None:
+    """Truly malformed callback: no ``code``, no ``error``. Surface
+    the existing ``token`` banner copy to the user (no new UI), but
+    audit ``reason: "missing_code"`` so ops can tell it apart from
+    a real token-exchange failure."""
+    app = _make_app(session_factory)
+    with TestClient(app) as client:
+        res = client.get(
+            "/api/v1/auth/google/callback",
+            params={"state": "some-state-value"},
+            follow_redirects=False,
+        )
+
+    assert res.status_code == 307, res.text
+    assert res.headers.get("location") == "http://localhost/login?sso_error=token"
+
+    rows = await _callback_failure_rows(session_factory)
+    assert len(rows) == 1
+    assert rows[0].detail == {"reason": "missing_code"}
+
+
 # ── cookie TTL pin ──────────────────────────────────────────────────────────
 
 
