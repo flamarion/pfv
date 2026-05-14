@@ -426,7 +426,7 @@ flowchart LR
   tfcapp --> hold[Waiting on Confirm and Apply]
   hold --> apply[Apply runs via OIDC -> tfc-apex-provisioner role]
   apply --> done[AWS resources updated]
-  apply -.->|outputs| consumers[github_actions_role_arn -> apex-deploy.yml<br/>s3_bucket_name -> apex-deploy.yml<br/>cloudfront_distribution_id -> apex-deploy.yml<br/>cloudfront_distribution_domain -> verify URL pre-cutover]
+  apply -.->|outputs| consumers[github_actions_role_arn -> apex-deploy.yml<br/>s3_bucket_name -> apex-deploy.yml<br/>cloudfront_distribution_id -> apex-deploy.yml<br/>cloudfront_distribution_domain -> diagnostic / fallback probe]
 ```
 
 ### Bootstrap (one-time)
