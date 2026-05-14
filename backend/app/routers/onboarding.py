@@ -14,6 +14,18 @@ and their org:
   transactions OR the demo sentinel category is already present.
   Audit-logged on success and on refusal.
 
+  Accepts an ``empty_org_only`` query parameter (default ``true``)
+  that documents caller intent for the in-app reseed flow:
+   - ``true``  → caller expects the org to already be empty. This
+                 is the safe path used by the onboarding wizard and
+                 the Settings "Load demo data" affordance.
+   - ``false`` → caller has just wiped via
+                 ``POST /api/v1/orgs/data/reset`` and expects the
+                 seed to succeed. The server does NOT auto-wipe.
+  Either way ``seed_org`` enforces emptiness server-side; the param
+  is informational and ends up in the audit ``detail`` so we can see
+  which flow the user came through.
+
 Org isolation: the service receives ``current_user.org_id`` directly;
 no path or body parameter can override which org gets seeded.
 """
@@ -88,6 +100,7 @@ async def complete_onboarding(
 @limiter.limit("3/hour")
 async def seed_demo(
     request: Request,
+    empty_org_only: bool = True,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
@@ -97,6 +110,12 @@ async def seed_demo(
     Refuses with 409 ``org_has_data`` when the org already has user
     transactions, or with 409 ``demo_already_applied`` when the demo
     sentinel category is already present.
+
+    ``empty_org_only`` is the caller-supplied intent flag — see the
+    module docstring. The server enforces emptiness regardless of the
+    value (no auto-wipe), so passing ``False`` only signals "I have
+    already wiped" for audit forensics; it does NOT relax the seed
+    contract.
     """
     # Snapshot the audit-relevant fields BEFORE any commit or rollback.
     # SQLAlchemy expires ORM attributes after commit / rollback by default
@@ -125,7 +144,7 @@ async def seed_demo(
             request_id=_request_id(),
             ip_address=get_client_ip(request),
             outcome="failure",
-            detail={"reason": str(exc)},
+            detail={"reason": str(exc), "empty_org_only": empty_org_only},
         )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -146,6 +165,7 @@ async def seed_demo(
             "accounts": result.accounts_created,
             "transactions": result.transactions_created,
             "categories": result.categories_created,
+            "empty_org_only": empty_org_only,
         },
     )
 

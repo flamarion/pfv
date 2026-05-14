@@ -231,3 +231,31 @@ async def test_seed_demo_409_on_second_call(session_factory):
     assert first.status_code == 200
     assert second.status_code == 409
     assert second.json()["detail"] == "org_has_data"
+
+
+@pytest.mark.asyncio
+async def test_seed_demo_records_empty_org_only_intent_in_audit(session_factory):
+    """The empty_org_only query param ends up in the audit `detail`
+    so admins can see whether the call came from the safe path
+    (default True, wizard / settings card) or the post-wipe replace
+    path (False, after the user typed-confirmed a data reset)."""
+    seeds = await _seed_user(session_factory)
+    app = make_app(session_factory, seeds["user_id"])
+    with TestClient(app) as client:
+        res = client.post(
+            "/api/v1/users/me/onboarding/seed-demo?empty_org_only=false"
+        )
+    assert res.status_code == 200, res.text
+
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                select(AuditEvent).where(
+                    AuditEvent.event_type == "onboarding.seed_demo.applied"
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].detail is not None
+        # Param flips into the audit detail verbatim.
+        assert rows[0].detail.get("empty_org_only") is False
