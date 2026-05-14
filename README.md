@@ -90,7 +90,6 @@ Every part of the project has a single authoritative document. Start with the ro
 | Doc | When you need it |
 |---|---|
 | [CLAUDE.md](CLAUDE.md) | Project-level guidance for Claude Code sessions. Stack, conventions, parallel-agent compose-isolation rule, migration branch guard, lifespan migration guard. |
-| [AGENTS.md](AGENTS.md) | How agents (Claude or otherwise) interact with this repo. Rules of engagement, what is and is not allowed without explicit owner approval. |
 
 ## Architecture
 
@@ -98,7 +97,8 @@ Every part of the project has a single authoritative document. Start with the ro
 Browser
   --> app.thebetterdecision.com (DO App Platform ingress)
         --> /api/*  --> backend  (FastAPI, port 8000)  --> MySQL  (pfv-data-01:3306)
-        --> /*      --> frontend (Next.js, port 3000)  --> Valkey (pfv-data-01:6379)
+        |                                              --> Valkey (pfv-data-01:6379)
+        --> /*      --> frontend (Next.js, port 3000)
   --> thebetterdecision.com (Route 53 -> CloudFront -> S3)
         --> static landing export (auth-free, no app code in bundle)
 ```

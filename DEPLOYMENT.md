@@ -2,7 +2,7 @@
 
 Audience: a contributor who just cloned the repo and wants to understand what happens between `git push` and a live change at `app.thebetterdecision.com` or `thebetterdecision.com`. Also a triage reference for CI/CD failures.
 
-This document covers the **target architecture**. The apex landing pipeline (Section 5) lands with **PR #267** (in flight, branch `feat/l5-2a-apex-deploy-workflow`). Everything else is live on `main` today.
+All four pipelines described here are live on `main` today (`test.yml`, `release.yml`, `deploy.yml`, `apex-deploy.yml`). The apex pipeline ships content to S3 + CloudFront, but the apex DNS swap (PR-D, see Section 5) is still pending; until it lands, the apex landing is reachable only via the CloudFront-assigned hostname, not via `https://thebetterdecision.com`.
 
 For "how do I get my code ready to push", read [`CONTRIBUTING.md`](./CONTRIBUTING.md). For the env var matrix, read [`ENVIRONMENT.md`](./ENVIRONMENT.md). For the managed-to-droplet data move, read [`infra/MIGRATION.md`](./infra/MIGRATION.md). This file does not duplicate any of them.
 
@@ -13,7 +13,7 @@ Four production surfaces. Each has its own pipeline. Some changes fan out across
 | Surface | URL | Hosted by | Updated by |
 |---|---|---|---|
 | App (FastAPI + Next.js dashboard) | `https://app.thebetterdecision.com` | DigitalOcean App Platform (`pfv` app) | `release.yml` (auto) or `deploy.yml` (manual) |
-| Apex landing (marketing, privacy, terms, docs) | `https://thebetterdecision.com` | AWS S3 + CloudFront | `apex-deploy.yml` (auto), **lands with PR #267** |
+| Apex landing (marketing, privacy, terms, docs) | `https://thebetterdecision.com` (DNS pending PR-D) | AWS S3 + CloudFront | `apex-deploy.yml` (auto) |
 | Data plane (MySQL 8 + Redis) | private VPC IP `10.42.x.x:3306 / :6379` | Self-hosted DO droplet `pfv-data-01` | TFC workspace `FlamaCorp/pfv` (manual confirm) |
 | Apex CDN + cert + IAM | n/a (control plane) | AWS (S3, CloudFront, ACM, IAM, Route 53) | TFC workspace `FlamaCorp/pfv-apex` (manual confirm) |
 
@@ -220,9 +220,9 @@ What it does NOT do: bump a version, create a tag, or post to a release feed. It
 
 For rollback to a prior `main` SHA, see Section 10.
 
-## 5. Apex landing deploy (`apex-deploy.yml`), lands with PR #267
+## 5. Apex landing deploy (`apex-deploy.yml`)
 
-> This workflow is on the in-flight branch `feat/l5-2a-apex-deploy-workflow` and is not on `main` yet. The rest of this section describes the target behavior once PR #267 merges. Source viewed via `git show origin/feat/l5-2a-apex-deploy-workflow:.github/workflows/apex-deploy.yml`.
+> Workflow is live on `main` (shipped in PR #267). It deploys to S3 + CloudFront on every push to `main` whose paths match the filter below. The apex hostname `https://thebetterdecision.com` is not wired to DNS yet (that lands with PR-D); until then, verify deploys against the CloudFront-assigned hostname from the TFC output `cloudfront_distribution_domain`.
 
 The apex landing (`thebetterdecision.com`) is a Next.js static export. `frontend/scripts/build-apex.sh` produces `frontend/out-apex/`. The workflow uploads that directory to an S3 bucket fronted by CloudFront in AWS, using **GitHub OIDC** to assume an IAM role (no long-lived AWS keys committed anywhere). The bucket, distribution, ACM cert, and IAM roles are provisioned by the `FlamaCorp/pfv-apex` TFC workspace (Section 7).
 
@@ -258,7 +258,7 @@ on:
       - "frontend/lib/styles.ts"
       - "frontend/components/brand/**"
       - "frontend/components/ThemeProvider.tsx"
-      - "frontend/components/tour/TourProvider.tsx"
+      - "frontend/components/tour/**"
       - "frontend/components/ui/BackLink.tsx"
       - "frontend/components/ui/CurrentYear.tsx"
       - "frontend/components/ui/ThemeToggle.tsx"
@@ -338,7 +338,15 @@ The OIDC trust policy on `github-actions-apex-deploy` (provisioned by PR #240) u
 ### How to verify an apex deploy
 
 1. Watch the workflow run: `https://github.com/flamarion/pfv/actions/workflows/apex-deploy.yml`
-2. `curl -fsS https://thebetterdecision.com/_meta.json` returns JSON containing the deployed commit SHA. The object is set to `no-cache` so this is always fresh.
+2. Curl `/_meta.json` to confirm the deployed commit SHA. The object is set to `no-cache` so this is always fresh.
+   - **Pre-PR-D (today):** apex DNS is not wired yet. Use the CloudFront-assigned hostname from the TFC output `cloudfront_distribution_domain`:
+     ```bash
+     curl -fsS https://<distribution>.cloudfront.net/_meta.json
+     ```
+   - **Post-PR-D:** apex DNS resolves to CloudFront. The canonical command:
+     ```bash
+     curl -fsS https://thebetterdecision.com/_meta.json
+     ```
 3. CloudFront invalidation status: AWS console -> CloudFront -> Distributions -> select -> Invalidations tab.
 
 ## 6. Terraform: `FlamaCorp/pfv` (DO data droplet)

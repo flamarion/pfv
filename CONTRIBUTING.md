@@ -104,7 +104,7 @@ Merge to `main`:
 
 - `.github/workflows/release.yml` runs on changes under `backend/**`, `frontend/**`, `nginx/**`, `.do/**`, or `Dockerfile*`. It runs `semantic-release`. If (and only if) `semantic-release` decides a new release is warranted, the gated `deploy` job pushes `.do/app.yaml` to DO App Platform, then `scripts/smoke-test.sh` asserts the live app serves traffic.
 - `chore:` / `docs:` / `refactor:` commits inside the allowlist still trigger `release.yml`, but `semantic-release` no-ops and the deploy job is skipped.
-- A future `apex-deploy.yml` (PR #267) will deploy the apex landing site on merges that touch the apex paths.
+- `.github/workflows/apex-deploy.yml` deploys the apex landing site (`thebetterdecision.com`) to AWS S3 + CloudFront on merges that touch the apex path filter. Independent of the DO release pipeline; landing-only commits never fire the DO redeploy.
 
 If you need to force a redeploy of the current production spec without merging a code change, use the manual workflow:
 
@@ -248,7 +248,7 @@ Google-SSO users have `password_set=False` until they explicitly set a password.
 
 ### Rate limiting
 
-All limits are per client IP via slowapi. In-memory storage is fine on single-replica App Platform; a Redis-backed store is deferred to the K8s migration.
+All limits are per client IP via slowapi. Production and Docker Compose use Redis / Valkey-backed storage (shipped in K8S-1, see `backend/app/rate_limit.py`); in-memory storage is the fallback when `REDIS_URL` is empty. Storage errors fail open so a Redis blip never blocks legitimate traffic.
 
 | Endpoint | Limit |
 |----------|-------|
