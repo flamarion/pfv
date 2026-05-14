@@ -791,32 +791,92 @@ def _make_app_as_user(session_factory, user_id: int) -> FastAPI:
 
 @pytest.mark.asyncio
 async def test_ofx_preview_rejects_foreign_org_account_id(session_factory):
-    """OFX preview rejects an account_id owned by a different org.
+    """Cross-org POST is refused by the account org-scope resolver, NOT by OFX parse.
 
     Regression gate for spec §1.1: every OFX preview request is
     org-scoped via the resolver that looks up the account. A user
     in org A submitting a request with org B's account_id MUST NOT
     receive a 200 with a preview of org A's matched rows -- the
-    resolver should refuse the foreign id. The contract-layer
-    acceptable surfaces are 404 (not found in this org) or a
-    domain-level 400; what's explicitly not acceptable is 200 OK
-    with row data attached.
+    resolver at ``backend/app/services/import_service.py`` lines
+    ~64-69 should refuse the foreign id by calling
+    ``transaction_service.validate_account``, which raises
+    ``ValidationError("Invalid account")`` (HTTP 400, detail
+    ``"Invalid account"``).
+
+    The body MUST be a syntactically valid OFX 2.x payload so that
+    ``parse_ofx`` succeeds and execution actually reaches that
+    org-scope branch. A malformed body would 400 at the parse step
+    with the ParseError text in ``detail`` -- the org-scope branch
+    would never run, and the test would still pass even if that
+    branch were deleted, defeating the regression gate. The
+    assertion below pins on the org-scope branch's distinctive
+    ``"Invalid account"`` detail to keep the two 400 surfaces
+    distinguishable.
     """
+    valid_ofx_2x = b"""<?xml version="1.0" encoding="UTF-8"?>
+<?OFX OFXHEADER="200" VERSION="200" SECURITY="NONE" OLDFILEUID="NONE" NEWFILEUID="NONE"?>
+<OFX>
+  <SIGNONMSGSRSV1>
+    <SONRS>
+      <STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS>
+      <DTSERVER>20260501120000</DTSERVER>
+      <LANGUAGE>ENG</LANGUAGE>
+    </SONRS>
+  </SIGNONMSGSRSV1>
+  <BANKMSGSRSV1>
+    <STMTTRNRS>
+      <TRNUID>1</TRNUID>
+      <STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS>
+      <STMTRS>
+        <CURDEF>EUR</CURDEF>
+        <BANKACCTFROM>
+          <BANKID>INGBNL2A</BANKID>
+          <ACCTID>NL01TEST0000000001</ACCTID>
+          <ACCTTYPE>CHECKING</ACCTTYPE>
+        </BANKACCTFROM>
+        <BANKTRANLIST>
+          <DTSTART>20260501</DTSTART>
+          <DTEND>20260501</DTEND>
+          <STMTTRN><TRNTYPE>DEBIT</TRNTYPE><DTPOSTED>20260501</DTPOSTED><TRNAMT>-12.34</TRNAMT><FITID>SCOPE0001</FITID><NAME>Test Merchant</NAME></STMTTRN>
+        </BANKTRANLIST>
+        <LEDGERBAL>
+          <BALAMT>-12.34</BALAMT>
+          <DTASOF>20260501</DTASOF>
+        </LEDGERBAL>
+      </STMTRS>
+    </STMTTRNRS>
+  </BANKMSGSRSV1>
+</OFX>
+"""
     org_a, org_b = await _seed_two_orgs(session_factory)
     app = _make_app_as_user(session_factory, user_id=org_a["user_id"])
     with TestClient(app) as client:
         resp = client.post(
             "/api/v1/import/ofx/preview",
-            files={"file": ("test.ofx", io.BytesIO(b"<OFX></OFX>"), "application/x-ofx")},
+            files={"file": ("test.ofx", io.BytesIO(valid_ofx_2x), "application/x-ofx")},
             data={"account_id": str(org_b["account_id"])},
         )
-    # Either the parse-error 400 fires first (the bogus OFX body) OR
-    # the org-scope check trips with 404. Both are acceptable failure
-    # surfaces; the regression gate is "never 200 OK with row data."
-    assert resp.status_code in (400, 404), (
-        f"Expected 400 or 404, got {resp.status_code}: {resp.text}"
+    # parse_ofx succeeds on this body (verified by the
+    # ``import.ofx.parsed`` log line in the captured stdout), so the
+    # 400 here MUST come from the org/account validator, not from
+    # parse. The detail string ``"Invalid account"`` is the org-scope
+    # branch's signature; a parse failure would carry ParseError text
+    # instead. A 200 would mean cross-org leakage.
+    assert resp.status_code == 400, (
+        f"Expected 400 (foreign account refused by org scope), got "
+        f"{resp.status_code}: {resp.text}"
     )
-    assert resp.status_code != 200
+    body = resp.json()
+    assert body.get("detail") == "Invalid account", (
+        f"Expected 400 'Invalid account' from org-scope branch, got "
+        f"detail={body.get('detail')!r}. A different 400 detail "
+        f"suggests the parse step failed before the org-scope check, "
+        f"which would defeat this regression gate."
+    )
+    # Belt-and-suspenders: response body must not carry preview row data.
+    assert "rows" not in body, (
+        f"400 response unexpectedly carries preview rows: {body}"
+    )
 
 
 @pytest.mark.asyncio
