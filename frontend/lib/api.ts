@@ -19,9 +19,19 @@ export class ApiTimeoutError extends Error {
   }
 }
 
+// Per-call options for apiFetch. Extends RequestInit so callers keep
+// passing the same method/body/headers shape they always have. The
+// optional ``timeoutMs`` lets callers override the default 10s budget
+// per-request (e.g. import preview/confirm, which intentionally race a
+// 10s server-side parser cap).
+export type ApiFetchOptions = RequestInit & {
+  timeoutMs?: number;
+};
+
 async function fetchWithTimeout(
   input: RequestInfo | URL,
   init: RequestInit = {},
+  timeoutMs: number = API_FETCH_TIMEOUT_MS,
 ): Promise<Response> {
   const controller = new AbortController();
   const upstreamSignal = init.signal;
@@ -42,7 +52,7 @@ async function fetchWithTimeout(
   const timeoutId = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, API_FETCH_TIMEOUT_MS);
+  }, timeoutMs);
 
   try {
     return await fetch(input, {
@@ -77,27 +87,36 @@ async function refreshAccessToken(): Promise<string | null> {
 
 export async function apiFetch<T>(
   path: string,
-  options: RequestInit = {}
+  options: ApiFetchOptions = {}
 ): Promise<T> {
-  const headers = new Headers(options.headers);
+  // Pull timeoutMs out of options BEFORE passing the rest to native fetch
+  // so it doesn't pollute the RequestInit. The same caller-provided value
+  // applies to both the primary request and the retry-after-refresh.
+  const { timeoutMs, ...fetchInit } = options;
+  const effectiveTimeout = timeoutMs ?? API_FETCH_TIMEOUT_MS;
+  const headers = new Headers(fetchInit.headers);
 
   if (accessToken) {
     headers.set("Authorization", `Bearer ${accessToken}`);
   }
 
   if (
-    options.body &&
-    typeof options.body === "string" &&
+    fetchInit.body &&
+    typeof fetchInit.body === "string" &&
     !headers.has("Content-Type")
   ) {
     headers.set("Content-Type", "application/json");
   }
 
-  let res = await fetchWithTimeout(`${API_URL}${path}`, {
-    ...options,
-    headers,
-    credentials: "include",
-  });
+  let res = await fetchWithTimeout(
+    `${API_URL}${path}`,
+    {
+      ...fetchInit,
+      headers,
+      credentials: "include",
+    },
+    effectiveTimeout,
+  );
 
   // On 401, attempt one silent refresh (even without a current token —
   // the refresh cookie may still be valid)
@@ -111,11 +130,15 @@ export async function apiFetch<T>(
 
     if (newToken) {
       headers.set("Authorization", `Bearer ${newToken}`);
-      res = await fetchWithTimeout(`${API_URL}${path}`, {
-        ...options,
-        headers,
-        credentials: "include",
-      });
+      res = await fetchWithTimeout(
+        `${API_URL}${path}`,
+        {
+          ...fetchInit,
+          headers,
+          credentials: "include",
+        },
+        effectiveTimeout,
+      );
     }
 
     // If still 401 after refresh attempt, the session is dead. Clear the

@@ -80,6 +80,8 @@ describe("apiFetch", () => {
   });
 
   it("times out an unresponsive initial request instead of hanging forever", async () => {
+    // Exercises the default 10s budget — no timeoutMs override on the call,
+    // so fetchWithTimeout falls back to API_FETCH_TIMEOUT_MS.
     vi.useFakeTimers();
     try {
       fetchMock.mockImplementationOnce(neverResolvingFetch());
@@ -95,6 +97,87 @@ describe("apiFetch", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("times out a hung retry-after-refresh and rejects with ApiTimeoutError without clearing auth", async () => {
+    vi.useFakeTimers();
+    try {
+      setAccessToken("stale-token");
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ detail: "expired" }, { status: 401 }))      // primary 401
+        .mockResolvedValueOnce(jsonResponse({ access_token: "fresh-token" }))             // refresh OK
+        .mockImplementationOnce(neverResolvingFetch());                                   // retry hangs
+
+      const promise = apiFetch("/api/v1/protected");
+      const assertion = expect(promise).rejects.toMatchObject({
+        name: "ApiTimeoutError",
+        message: "Request timed out. Try again.",
+      });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await assertion;
+
+      // Refresh succeeded -> token IS saved, retry hung -> ApiTimeoutError
+      // but the session is intact, so the user can simply retry the same
+      // call without being kicked back to /login.
+      expect(getAccessToken()).toBe("fresh-token");
+      expect(dispatchEventSpy).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(3);  // primary + refresh + retry
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("custom timeoutMs aborts at the configured value, not the default", async () => {
+    vi.useFakeTimers();
+    try {
+      setAccessToken("access-123");
+      fetchMock.mockImplementationOnce(neverResolvingFetch());
+
+      const promise = apiFetch("/api/v1/slow-endpoint", { timeoutMs: 5_000 });
+      const assertion = expect(promise).rejects.toMatchObject({ name: "ApiTimeoutError" });
+
+      // Advance to 4999ms — should NOT have aborted yet.
+      await vi.advanceTimersByTimeAsync(4_999);
+      // Promise still pending; expect.rejects has not fired yet.
+
+      // Advance the last 1ms — aborts at exactly 5000ms.
+      await vi.advanceTimersByTimeAsync(1);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("custom timeoutMs longer than default does not abort at 10s", async () => {
+    vi.useFakeTimers();
+    try {
+      setAccessToken("access-123");
+      fetchMock.mockImplementationOnce(neverResolvingFetch());
+
+      const promise = apiFetch("/api/v1/import/preview", { timeoutMs: 15_000 });
+      const assertion = expect(promise).rejects.toMatchObject({ name: "ApiTimeoutError" });
+
+      // Advance to 10000ms — should NOT have aborted at the default.
+      await vi.advanceTimersByTimeAsync(10_000);
+      // Promise still pending.
+
+      // Advance another 5000ms — aborts at 15000ms total.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not forward timeoutMs to native fetch", async () => {
+    setAccessToken("access-123");
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+    await apiFetch("/api/v1/anything", { timeoutMs: 5_000 });
+
+    const fetchInit = fetchMock.mock.calls[0][1];
+    expect(fetchInit).not.toHaveProperty("timeoutMs");
   });
 
   it("times out a hung refresh attempt and clears auth state", async () => {
