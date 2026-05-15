@@ -199,31 +199,70 @@ describe("serverFetch", () => {
 });
 
 describe("safeBackendHost", () => {
-  // Direct unit test of the URL-parse guard. SERVER_API_URL is resolved
-  // once at module load from process.env; rather than monkey-patching that,
-  // we exercise the helper's fallback contract by exporting it and
-  // verifying it returns the sentinel for malformed inputs by simulating
-  // the same try/catch shape.
-  it("returns 'invalid-backend-url' when URL parsing throws", async () => {
-    const { safeBackendHost } = await import("@/lib/server-fetch");
-    // Real signature takes no args; we assert the well-formed case returns
-    // a non-empty host string AND that the guard contract holds when URL
-    // construction would throw. The first half exercises the production
-    // path; the second half guarantees the fallback.
-    expect(typeof safeBackendHost()).toBe("string");
-    expect(safeBackendHost().length).toBeGreaterThan(0);
+  // SERVER_API_URL is resolved once at module load from process.env, so
+  // these tests use vi.stubEnv + vi.resetModules + a fresh dynamic
+  // import to exercise the exported helper under different env values.
+  // This replaces a previous test that exercised a local `guarded()`
+  // function rather than the actual exported helper.
 
-    // Simulate the guarded shape directly to lock in the contract.
-    const guarded = (raw: string): string => {
-      try {
-        return new URL(raw).host;
-      } catch {
-        return "invalid-backend-url";
-      }
-    };
-    expect(guarded("not a url")).toBe("invalid-backend-url");
-    expect(guarded("")).toBe("invalid-backend-url");
-    expect(guarded("missing-scheme.example.com")).toBe("invalid-backend-url");
-    expect(guarded("http://backend:8000")).toBe("backend:8000");
+  it("safeBackendHost returns 'invalid-backend-url' when BACKEND_INTERNAL_URL is malformed", async () => {
+    vi.stubEnv("BACKEND_INTERNAL_URL", "not a url");
+    vi.resetModules();
+    const mod = await import("@/lib/server-fetch");
+    expect(mod.safeBackendHost()).toBe("invalid-backend-url");
+    vi.unstubAllEnvs();
+  });
+
+  it("safeBackendHost returns parsed host when BACKEND_INTERNAL_URL is well-formed", async () => {
+    vi.stubEnv("BACKEND_INTERNAL_URL", "https://backend:8000");
+    vi.resetModules();
+    const mod = await import("@/lib/server-fetch");
+    expect(mod.safeBackendHost()).toBe("backend:8000");
+    vi.unstubAllEnvs();
+  });
+});
+
+describe("serverFetch privacy regression (end-to-end)", () => {
+  // Combine the two threats: malformed BACKEND_INTERNAL_URL + a path
+  // with a secret query string. Node's fetch throws errors whose
+  // .message can include the full attempted URL (with query) e.g.
+  // 'Failed to parse URL from not a url/api?token=SECRET_QUERY'. The
+  // sanitizeErrorMessage helper must scrub the secret before logging.
+
+  it("serverFetch failure with malformed BACKEND_INTERNAL_URL never logs secrets from path or error", async () => {
+    vi.stubEnv("BACKEND_INTERNAL_URL", "not a url");
+    vi.resetModules();
+    // Reproduce the exact error shape Node's fetch throws when the
+    // assembled URL is unparseable. In jsdom test env, fetch doesn't
+    // necessarily reject on its own for a malformed URL string, so we
+    // mock it to throw the verified architect shape:
+    //   'Failed to parse URL from not a url/api?token=SECRET_QUERY'
+    vi.spyOn(global, "fetch").mockRejectedValue(
+      new TypeError(
+        "Failed to parse URL from not a url/api/v1/auth/something?token=SECRET-QUERY-VALUE",
+      ),
+    );
+    // The vi.mock("@/lib/logger", ...) declaration at the top of this
+    // file is hoisted and survives resetModules — the freshly-imported
+    // module graph still resolves to the same mocked logger instance.
+    const mod = await import("@/lib/server-fetch");
+    const { logger } = await import("@/lib/logger");
+    (logger.warn as unknown as ReturnType<typeof vi.fn>).mockClear?.();
+
+    await mod.serverFetch(
+      "/api/v1/auth/something?token=SECRET-QUERY-VALUE",
+      {},
+    );
+
+    expect(logger.warn).toHaveBeenCalled();
+    const payload = (logger.warn as unknown as ReturnType<typeof vi.fn>).mock
+      .calls[0][1];
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain("SECRET-QUERY-VALUE");
+    // Sanity-check: backend_host fell back to the sentinel, proving the
+    // malformed-env path was the one exercised.
+    expect(payload.backend_host).toBe("invalid-backend-url");
+
+    vi.unstubAllEnvs();
   });
 });

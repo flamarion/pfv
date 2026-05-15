@@ -41,6 +41,29 @@ export function safeBackendHost(): string {
   }
 }
 
+// Strip query strings from URL-like tokens so a thrown error message
+// like 'Failed to parse URL from not a url/api?token=SECRET' cannot
+// leak the secret into the structured log. Whitespace-tokenized so
+// we don't over-redact prose containing question marks.
+//
+// Also caps the total length so a runaway error message can't blow
+// up a single log line.
+const MAX_ERROR_MESSAGE_LEN = 500;
+
+function sanitizeErrorMessage(msg: string): string {
+  const tokens = msg.split(/\s+/);
+  const redacted = tokens.map((token) => {
+    const q = token.indexOf("?");
+    if (q === -1) return token;
+    return token.slice(0, q) + "?[REDACTED]";
+  });
+  const joined = redacted.join(" ");
+  if (joined.length > MAX_ERROR_MESSAGE_LEN) {
+    return joined.slice(0, MAX_ERROR_MESSAGE_LEN) + "...[truncated]";
+  }
+  return joined;
+}
+
 export type ServerFetchOptions = {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: BodyInit;
@@ -104,12 +127,14 @@ export async function serverFetch<T>(
 
     return (await res.json()) as T;
   } catch (err) {
+    const errorName = err instanceof Error ? err.name : "Unknown";
+    const rawMessage = err instanceof Error ? err.message : String(err);
     logger.warn("server_fetch_failed", {
       backend_host: safeBackendHost(),
       method: options.method ?? "GET",
       path: path.split("?")[0],
-      error_name: err instanceof Error ? err.name : "Unknown",
-      error_message: err instanceof Error ? err.message : String(err),
+      error_name: errorName,
+      error_message: sanitizeErrorMessage(rawMessage),
     });
     return null;
   }
