@@ -36,6 +36,16 @@ describe("apiFetch", () => {
     dispatchEventSpy.mockRestore();
   });
 
+  function neverResolvingFetch() {
+    return (_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        signal?.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      });
+  }
+
   it("adds auth and JSON headers for string request bodies", async () => {
     setAccessToken("access-123");
     fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }));
@@ -67,6 +77,51 @@ describe("apiFetch", () => {
     const retryHeaders = fetchMock.mock.calls[2][1]?.headers as Headers;
     expect(retryHeaders.get("Authorization")).toBe("Bearer fresh-token");
     expect(getAccessToken()).toBe("fresh-token");
+  });
+
+  it("times out an unresponsive initial request instead of hanging forever", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockImplementationOnce(neverResolvingFetch());
+
+      const promise = apiFetch("/api/v1/accounts");
+      const assertion = expect(promise).rejects.toMatchObject({
+        name: "ApiTimeoutError",
+        message: "Request timed out. Try again.",
+      });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out a hung refresh attempt and clears auth state", async () => {
+    vi.useFakeTimers();
+    try {
+      setAccessToken("stale-token");
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ detail: "expired" }, { status: 401 }))
+        .mockImplementationOnce(neverResolvingFetch());
+
+      const promise = apiFetch("/api/v1/protected");
+      const assertion = expect(promise).rejects.toMatchObject({
+        name: "ApiResponseError",
+        status: 401,
+        message: "expired",
+      });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await assertion;
+      expect(getAccessToken()).toBeNull();
+      expect(dispatchEventSpy).toHaveBeenCalledWith(expect.any(Event));
+      const event = dispatchEventSpy.mock.calls[0]?.[0];
+      expect(event?.type).toBe("auth:unauthenticated");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("clears auth state and dispatches an event after terminal 401s", async () => {

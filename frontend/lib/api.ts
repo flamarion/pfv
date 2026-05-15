@@ -1,4 +1,5 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
+const API_FETCH_TIMEOUT_MS = 10_000;
 
 let accessToken: string | null = null;
 let refreshPromise: Promise<string | null> | null = null;
@@ -11,9 +12,57 @@ export function getAccessToken(): string | null {
   return accessToken;
 }
 
+export class ApiTimeoutError extends Error {
+  constructor() {
+    super("Request timed out. Try again.");
+    this.name = "ApiTimeoutError";
+  }
+}
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+): Promise<Response> {
+  const controller = new AbortController();
+  const upstreamSignal = init.signal;
+  let timedOut = false;
+
+  const abortFromUpstream = () => {
+    controller.abort(upstreamSignal?.reason);
+  };
+
+  if (upstreamSignal?.aborted) {
+    abortFromUpstream();
+  } else {
+    upstreamSignal?.addEventListener("abort", abortFromUpstream, {
+      once: true,
+    });
+  }
+
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, API_FETCH_TIMEOUT_MS);
+
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (timedOut) {
+      throw new ApiTimeoutError();
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+    upstreamSignal?.removeEventListener("abort", abortFromUpstream);
+  }
+}
+
 async function refreshAccessToken(): Promise<string | null> {
   try {
-    const res = await fetch(`${API_URL}/api/v1/auth/refresh`, {
+    const res = await fetchWithTimeout(`${API_URL}/api/v1/auth/refresh`, {
       method: "POST",
       credentials: "include",
     });
@@ -44,7 +93,7 @@ export async function apiFetch<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  let res = await fetch(`${API_URL}${path}`, {
+  let res = await fetchWithTimeout(`${API_URL}${path}`, {
     ...options,
     headers,
     credentials: "include",
@@ -62,7 +111,7 @@ export async function apiFetch<T>(
 
     if (newToken) {
       headers.set("Authorization", `Bearer ${newToken}`);
-      res = await fetch(`${API_URL}${path}`, {
+      res = await fetchWithTimeout(`${API_URL}${path}`, {
         ...options,
         headers,
         credentials: "include",
