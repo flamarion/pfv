@@ -54,8 +54,10 @@ describe("getServerSession", () => {
     const { getServerSession, logger } = await loadModule();
     const session = await getServerSession();
     expect(session).toBeNull();
+    // Post-PR-B: catch path emits `server_fetch_failed` from inside the
+    // serverFetch helper instead of `server_session_verify_failed`.
     expect(logger.warn).toHaveBeenCalledWith(
-      "server_session_verify_failed",
+      "server_fetch_failed",
       expect.objectContaining({
         error_name: "TypeError",
         error_message: expect.stringContaining("Failed to fetch"),
@@ -82,7 +84,7 @@ describe("getServerSession", () => {
     const session = await getServerSession();
     expect(session).toBeNull();
     expect(logger.warn).toHaveBeenCalledWith(
-      "server_session_verify_failed",
+      "server_fetch_failed",
       expect.objectContaining({ error_name: "SyntaxError" })
     );
   });
@@ -99,6 +101,8 @@ describe("getServerSession", () => {
     const { getServerSession, logger } = await loadModule();
     const session = await getServerSession();
     expect(session).toBeNull();
+    // silentNonOk=true is passed by getServerSession for /auth/verify, so
+    // the helper suppresses the warn even though status is non-OK.
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
