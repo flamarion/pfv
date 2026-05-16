@@ -348,3 +348,352 @@ async def test_refresh_session_expired_emits_legacy_cleanup(session_factory):
     assert res.status_code == 401
     assert res.json()["detail"].startswith("Session expired")
     _assert_legacy_cleanup(res.headers)
+
+
+# ── Ambiguous-session guard: refuse to silently pick one of two users ──────
+
+
+async def test_refresh_rejects_when_two_valid_users_present(session_factory):
+    """Two refresh cookies, each valid, each for a DIFFERENT user
+    (e.g. legacy cookie belongs to account A, current cookie belongs to
+    account B after an account switch). Auto-selecting either would
+    silently authenticate the wrong identity, so the validator must
+    refuse and force a clean re-login. /refresh must also emit
+    delete-cookies for BOTH the canonical and the legacy path so the
+    browser is fully reset."""
+    user_a = await _seed_user(session_factory, username="alice")
+    user_b = await _seed_user(session_factory, username="bob")
+
+    token_a = create_refresh_token(user_a)
+    token_b = create_refresh_token(user_b)
+
+    app = make_app(session_factory)
+    with TestClient(app) as client:
+        res = client.post(
+            "/api/v1/auth/refresh",
+            headers={"Cookie": f"refresh_token={token_a}; refresh_token={token_b}"},
+        )
+
+    assert res.status_code == 401
+    assert res.json()["detail"] == "Ambiguous session — please sign in again"
+
+    # Both the canonical Path=/ and the legacy
+    # Path=/api/v1/auth/refresh cookies must be cleared so the browser
+    # stops sending either of them.
+    cookies = _set_cookie_values_for(res.headers, "refresh_token")
+    canonical_clear = [
+        c for c in cookies
+        if "Path=/" in c
+        and f"Path={LEGACY_REFRESH_COOKIE_PATH}" not in c
+        and ("Max-Age=0" in c or "expires=" in c.lower())
+    ]
+    legacy_clear = [
+        c for c in cookies
+        if f"Path={LEGACY_REFRESH_COOKIE_PATH}" in c
+        and ("Max-Age=0" in c or "expires=" in c.lower())
+    ]
+    assert canonical_clear, (
+        f"ambiguous /refresh must clear canonical Path=/ cookie. Got: {cookies}"
+    )
+    assert legacy_clear, (
+        f"ambiguous /refresh must clear legacy Path={LEGACY_REFRESH_COOKIE_PATH} cookie. Got: {cookies}"
+    )
+
+
+async def test_verify_rejects_when_two_valid_users_present(session_factory):
+    """/verify must also refuse the ambiguous case, but MUST NOT emit
+    any Set-Cookie (its no-Set-Cookie invariant is load-bearing for
+    RSC). The follow-up /refresh from the client will do the cleanup."""
+    user_a = await _seed_user(session_factory, username="carol")
+    user_b = await _seed_user(session_factory, username="dave")
+
+    token_a = create_refresh_token(user_a)
+    token_b = create_refresh_token(user_b)
+
+    app = make_app(session_factory)
+    with TestClient(app) as client:
+        res = client.post(
+            "/api/v1/auth/verify",
+            headers={"Cookie": f"refresh_token={token_a}; refresh_token={token_b}"},
+        )
+
+    assert res.status_code == 401
+    assert res.json()["detail"] == "Ambiguous session — please sign in again"
+
+    header_keys_lower = {k.lower() for k in res.headers.keys()}
+    assert "set-cookie" not in header_keys_lower, (
+        f"/verify must not emit Set-Cookie on ambiguous-session 401. "
+        f"Got: {dict(res.headers)}"
+    )
+
+
+async def test_refresh_prefers_newest_iat_for_same_user(session_factory):
+    """Two valid refresh cookies for the SAME user (e.g. legacy + current
+    after the PR #211 migration where both still validate). Selection
+    must be deterministic and prefer the newer (higher ``iat``) token —
+    the legacy cookie must never out-vote the current one. The newly
+    issued refresh cookie carries forward the SAME session_created_at
+    as the selected (newer) token."""
+    user_id = await _seed_user(session_factory)
+
+    # Both iats in the past so PyJWT accepts them; cutoff stays at
+    # default (no sessions_invalidated_at) so both decode through to
+    # successful validation.
+    now = datetime.now(timezone.utc)
+    older = _mint_refresh_at(user_id, iat=now - timedelta(minutes=30))
+    newer = _mint_refresh_at(user_id, iat=now - timedelta(minutes=1))
+
+    # Decode the newer token to learn its session_created_at — the
+    # rotation should preserve it.
+    import jwt as _pyjwt
+    newer_payload = _pyjwt.decode(
+        newer, app_settings.jwt_secret_key, algorithms=[app_settings.jwt_algorithm]
+    )
+    newer_session_created_at = int(newer_payload["session_created_at"])
+
+    app = make_app(session_factory)
+    with TestClient(app) as client:
+        # Legacy/older first (browser send order), newer second.
+        res = client.post(
+            "/api/v1/auth/refresh",
+            headers={"Cookie": f"refresh_token={older}; refresh_token={newer}"},
+        )
+
+    assert res.status_code == 200, res.text
+
+    # The rotated refresh cookie carries forward the NEWER session
+    # marker. Decode the new cookie and assert.
+    cookies = _set_cookie_values_for(res.headers, "refresh_token")
+    canonical = [
+        c for c in cookies
+        if "Path=/" in c
+        and f"Path={LEGACY_REFRESH_COOKIE_PATH}" not in c
+        and "Max-Age=0" not in c
+    ]
+    assert canonical, f"refresh must set a new canonical cookie. Got: {cookies}"
+    new_cookie_value = canonical[0].split(";", 1)[0].split("=", 1)[1]
+    rotated_payload = _pyjwt.decode(
+        new_cookie_value,
+        app_settings.jwt_secret_key,
+        algorithms=[app_settings.jwt_algorithm],
+    )
+    assert int(rotated_payload["session_created_at"]) == newer_session_created_at, (
+        "rotation should carry forward the NEWER token's session_created_at, "
+        f"not the older one's. Got: {rotated_payload}"
+    )
+
+
+async def test_refresh_prefers_newest_iat_when_order_reversed(session_factory):
+    """Selection is by iat, not by header position."""
+    user_id = await _seed_user(session_factory)
+
+    now = datetime.now(timezone.utc)
+    older = _mint_refresh_at(user_id, iat=now - timedelta(minutes=30))
+    newer = _mint_refresh_at(user_id, iat=now - timedelta(minutes=1))
+
+    import jwt as _pyjwt
+    newer_payload = _pyjwt.decode(
+        newer, app_settings.jwt_secret_key, algorithms=[app_settings.jwt_algorithm]
+    )
+    newer_session_created_at = int(newer_payload["session_created_at"])
+
+    app = make_app(session_factory)
+    with TestClient(app) as client:
+        # Newer first, older second.
+        res = client.post(
+            "/api/v1/auth/refresh",
+            headers={"Cookie": f"refresh_token={newer}; refresh_token={older}"},
+        )
+
+    assert res.status_code == 200, res.text
+    cookies = _set_cookie_values_for(res.headers, "refresh_token")
+    canonical = [
+        c for c in cookies
+        if "Path=/" in c
+        and f"Path={LEGACY_REFRESH_COOKIE_PATH}" not in c
+        and "Max-Age=0" not in c
+    ]
+    new_cookie_value = canonical[0].split(";", 1)[0].split("=", 1)[1]
+    rotated_payload = _pyjwt.decode(
+        new_cookie_value,
+        app_settings.jwt_secret_key,
+        algorithms=[app_settings.jwt_algorithm],
+    )
+    assert int(rotated_payload["session_created_at"]) == newer_session_created_at
+
+
+# ── _issue_tokens cleanup (MFA verify, etc.) ───────────────────────────────
+
+
+def test_issue_tokens_helper_emits_legacy_cleanup():
+    """``_issue_tokens`` is the shared exit point for several MFA login
+    flows (``/mfa/verify``, ``/mfa/recovery``, and ``/mfa/email-verify``).
+    Pinning the helper directly avoids the cost of a full MFA-setup
+    fixture while still proving the cleanup is wired."""
+    from fastapi import Response
+    from app.routers.auth import _issue_tokens
+
+    class _FakeUser:
+        def __init__(self):
+            self.id = 1
+            self.org_id = 1
+            self.role = Role.OWNER
+
+    response = Response()
+    _issue_tokens(_FakeUser(), response)
+
+    # Response.raw_headers is the underlying list of (bytes, bytes)
+    # tuples populated by set_cookie / delete_cookie.
+    cookies = [v.decode() for k, v in response.raw_headers if k == b"set-cookie"]
+    refresh_cookies = [c for c in cookies if c.startswith("refresh_token=")]
+    legacy_clear = [
+        c for c in refresh_cookies if f"Path={LEGACY_REFRESH_COOKIE_PATH}" in c
+    ]
+    assert legacy_clear, (
+        f"_issue_tokens must emit legacy-path cleanup Set-Cookie. "
+        f"Got refresh_token Set-Cookies: {refresh_cookies}"
+    )
+
+
+# ── Google SSO callback cleanup ────────────────────────────────────────────
+
+
+@pytest.fixture
+def google_config(monkeypatch):
+    """Populate the Google OAuth env so ``_validate_google_config`` passes."""
+    monkeypatch.setattr(app_settings, "google_client_id", "test-client-id")
+    monkeypatch.setattr(app_settings, "google_client_secret", "test-client-secret")
+    monkeypatch.setattr(app_settings, "app_url", "http://localhost")
+    yield
+
+
+async def test_google_callback_emits_legacy_cleanup(
+    session_factory, google_config, monkeypatch
+):
+    """The Google SSO callback writes the refresh cookie onto a
+    directly-returned RedirectResponse. Pin that the legacy-path
+    cleanup rides along."""
+    # Seed a default plan so ``create_trial`` (new-user branch) does
+    # not 500, and seed an existing user matching the canned email so
+    # the callback takes the existing-user branch (no plan required,
+    # but cheap insurance).
+    from app.models.subscription import Plan
+    async with session_factory() as db:
+        existing = await db.scalar(select(Plan).where(Plan.slug == "free"))
+        if existing is None:
+            db.add(Plan(slug="free", name="Free", is_active=True, sort_order=0))
+            await db.commit()
+        org = Organization(name="Acme", billing_cycle_day=1)
+        db.add(org)
+        await db.flush()
+        db.add(User(
+            org_id=org.id,
+            username="alice",
+            email="alice@acme.io",
+            password_hash=hash_password(PASSWORD),
+            role=Role.OWNER,
+            is_active=True,
+            email_verified=True,
+        ))
+        await db.commit()
+
+    # Mock httpx so the callback's token-exchange and userinfo calls
+    # return a successful verified-email payload for alice@acme.io.
+    from app.routers import auth as auth_module
+
+    class _FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def post(self, *args, **kwargs):
+            return _FakeResponse(200, {"access_token": "fake-token"})
+
+        async def get(self, *args, **kwargs):
+            return _FakeResponse(200, {
+                "email": "alice@acme.io",
+                "verified_email": True,
+                "given_name": "Alice",
+                "family_name": "A",
+            })
+
+    monkeypatch.setattr(auth_module.httpx, "AsyncClient", _FakeClient)
+
+    # Wire the session-factory dependency so audit writes hit the
+    # in-memory DB (Google callback emits success audit).
+    from app.deps import get_session_factory
+
+    app = make_app(session_factory)
+
+    async def _override_session_factory():
+        return session_factory
+
+    app.dependency_overrides[get_session_factory] = _override_session_factory
+
+    with TestClient(app) as client:
+        client.cookies.set("oauth_state", "matching-state")
+        res = client.get(
+            "/api/v1/auth/google/callback",
+            params={"code": "dummy", "state": "matching-state"},
+            follow_redirects=False,
+        )
+
+    assert res.status_code == 302, res.text
+    _assert_legacy_cleanup(res.headers)
+
+
+# ── Invitation accept cleanup ──────────────────────────────────────────────
+
+
+async def test_invite_accept_emits_legacy_cleanup(session_factory, monkeypatch):
+    """``POST /api/v1/orgs/invitations/accept`` sets its own refresh
+    cookie on success (``backend/app/routers/org_members.py``). The
+    legacy cleanup must ride along on that response too."""
+    from app.routers import org_members as org_members_module
+    from app.routers.org_members import router as org_members_router
+
+    user_id = await _seed_user(session_factory, username="invitee")
+
+    # Monkeypatch the service to return a real user without needing to
+    # construct the full invitation/token plumbing. The router is what
+    # we're pinning here, not the service.
+    async def _fake_accept(db, *, token, username, password):
+        result = await db.execute(select(User).where(User.id == user_id))
+        return result.scalar_one()
+
+    monkeypatch.setattr(
+        org_members_module.invitation_service, "accept_invitation", _fake_accept
+    )
+
+    app = FastAPI()
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    async def override_get_db() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.include_router(org_members_router)
+
+    with TestClient(app) as client:
+        res = client.post(
+            "/api/v1/orgs/invitations/accept",
+            json={"token": "fake-token", "username": "invitee", "password": PASSWORD},
+        )
+
+    assert res.status_code == 200, res.text
+    _assert_legacy_cleanup(res.headers)

@@ -306,6 +306,13 @@ async def login(
 
 SESSION_EXPIRED_DETAIL = "Session expired — please sign in again"
 
+# Emitted when the request carries refresh cookies for two or more
+# distinct user accounts (e.g. a legacy account-A cookie shadowing a
+# current account-B cookie after an account switch). Auto-selecting
+# either would silently authenticate the wrong identity, so the only
+# safe response is to force a clean re-login.
+AMBIGUOUS_SESSION_DETAIL = "Ambiguous session — please sign in again"
+
 # Legacy refresh-cookie path used before PR #211 (commit 70ddd26,
 # 2026-05-11) widened the cookie path to ``/``. Cookies set at this
 # narrower path cannot be cleared by ``delete_cookie(path="/")`` because
@@ -439,18 +446,31 @@ async def _validate_refresh_cookie(
     refresh_tokens: list[str],
     db: AsyncSession,
 ) -> tuple[User, dict, datetime | None]:
-    """Validate ANY of the provided refresh-token cookie values.
+    """Validate the provided refresh-token cookie values and pick one.
 
-    Returns the first cookie that passes the full validation chain. If
-    every cookie fails, raises the last failure so error semantics match
-    the single-token case when the caller really did only have one
-    cookie.
+    Rules:
+      - No tokens at all → ``401 "No refresh token"``.
+      - All tokens fail validation → re-raise the last failure so single-
+        cookie error semantics are preserved when only one cookie was
+        actually presented.
+      - At least one token validates AND every successful token resolves
+        to the SAME ``user.id`` → pick the newest token (highest ``iat``)
+        for that user and return it.
+      - Successful tokens map to MORE THAN ONE distinct ``user.id`` →
+        raise ``401 AMBIGUOUS_SESSION_DETAIL``. Auto-selecting either
+        would silently authenticate the wrong identity (an attacker who
+        could plant a second valid refresh cookie could otherwise switch
+        the active account on the next refresh). The route caller is
+        responsible for clearing both canonical and legacy cookies on
+        this path; ``/verify`` lets the exception propagate without
+        touching cookies (no-Set-Cookie invariant).
 
-    Shared between ``/auth/refresh`` (rotating) and ``/auth/verify``
-    (non-rotating). Walking every ``refresh_token`` value found in the
-    Cookie header ensures a legacy ``Path=/api/v1/auth/refresh`` cookie
-    shadowing the current ``Path=/`` cookie (PR #211 migration) does
-    not produce a false 401.
+    Walking every ``refresh_token`` value found in the Cookie header is
+    necessary because Starlette's parser collapses duplicate names to a
+    single value (last wins) — after the PR #211 path migration a
+    browser may carry both a legacy ``Path=/api/v1/auth/refresh`` cookie
+    and a current ``Path=/`` cookie, and the legacy one may be the one
+    the parser surfaces.
     """
     if not refresh_tokens:
         raise HTTPException(
@@ -458,14 +478,30 @@ async def _validate_refresh_cookie(
             detail="No refresh token",
         )
 
+    successes: list[tuple[User, dict, datetime | None]] = []
     last_exc: HTTPException | None = None
     for token in refresh_tokens:
         try:
-            return await _validate_single_refresh_token(token, db)
+            successes.append(await _validate_single_refresh_token(token, db))
         except HTTPException as exc:
             last_exc = exc
-    assert last_exc is not None  # loop ran at least once
-    raise last_exc
+
+    if not successes:
+        assert last_exc is not None  # loop ran at least once
+        raise last_exc
+
+    distinct_user_ids = {triple[0].id for triple in successes}
+    if len(distinct_user_ids) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=AMBIGUOUS_SESSION_DETAIL,
+        )
+
+    # Single user, possibly multiple valid tokens. Prefer the newest by
+    # ``iat`` so a stale legacy cookie never out-votes the current one
+    # for the same user.
+    successes.sort(key=lambda triple: triple[1].get("iat", 0), reverse=True)
+    return successes[0]
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -494,20 +530,23 @@ async def refresh(
             refresh_tokens, db
         )
     except HTTPException as exc:
-        # Clear the stale cookie on absolute session-lifetime expiry so the
-        # browser stops sending it. Other 401s leave the cookie in place;
-        # they may be transient (e.g. invalid-but-recoverable) or carry
-        # their own meaning.
-        if exc.detail == SESSION_EXPIRED_DETAIL:
+        # Two terminal paths clear BOTH the canonical and the legacy
+        # cookie so the browser stops sending them: absolute session
+        # expiry (a normal end-of-session signal) and ambiguous session
+        # (request carried valid refresh cookies for >1 distinct user;
+        # the only safe response is to force a clean re-login). Other
+        # 401s leave the cookie in place — they may be transient
+        # (e.g. invalid-but-recoverable) or carry their own meaning.
+        if exc.detail in (SESSION_EXPIRED_DETAIL, AMBIGUOUS_SESSION_DETAIL):
             from fastapi.responses import JSONResponse
 
-            expired_response = JSONResponse(
+            cleared = JSONResponse(
                 status_code=exc.status_code,
                 content={"detail": exc.detail},
             )
-            expired_response.delete_cookie("refresh_token", path="/")
-            _clear_legacy_refresh_cookie(expired_response)
-            return expired_response
+            cleared.delete_cookie("refresh_token", path="/")
+            _clear_legacy_refresh_cookie(cleared)
+            return cleared
         raise
 
     # Carry forward session_created_at from the original login
