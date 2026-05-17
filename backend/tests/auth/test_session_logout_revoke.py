@@ -657,3 +657,143 @@ async def test_logout_one_device_leaves_other_device_authenticated(
     assert rotate.status_code == 200
     new_raw = _canonical_refresh_cookie(rotate.headers)
     assert new_raw is not None
+
+
+# ─── 9. Architect P1 (PR #308 re-review): primary-token validation must
+#       gate on family-set membership, not just primary existence. ──────────
+#
+# The logout design makes ``DEL auth:session:by_sid:{sid}`` (Round A) the
+# load-bearing revocation step. Primary keys are cleaned up later in Round
+# B. Without a membership check on the primary path, a token whose family
+# has been deleted but whose primary key is still alive (Round B in flight
+# or partially failed) would pass /verify and /refresh — defeating the
+# revocation contract.
+
+
+async def test_verify_rejects_primary_when_family_set_missing(
+    session_factory, fake_redis
+):
+    """Architect P1 on PR #308. Set up: primary key for ``jti`` exists
+    and binds correctly to ``{user_id, sid}`` — but the family set has
+    been deleted (simulates the gap between logout Round A and Round B,
+    or a partial Round B failure). ``/verify`` must return 401."""
+    await _seed_user(session_factory)
+    app = _make_app(session_factory)
+    with TestClient(app) as client:
+        token = _login(client)
+        jti, sid = decode_refresh_jti_sid(token)
+
+        # Sanity: family set currently contains the jti, primary key exists.
+        assert jti in fake_redis._sets[f"auth:session:by_sid:{sid}"]
+        assert f"auth:session:{jti}" in fake_redis._kv
+
+        # Simulate Round A: delete the family set ONLY.
+        # Primary + grace keys deliberately remain — that's the bug class.
+        del fake_redis._sets[f"auth:session:by_sid:{sid}"]
+
+        verify = client.post(
+            "/api/v1/auth/verify", cookies={"refresh_token": token}
+        )
+    assert verify.status_code == 401, verify.json()
+    assert "invalidated" in verify.json()["detail"].lower()
+
+
+async def test_refresh_rejects_primary_when_family_set_missing(
+    session_factory, fake_redis
+):
+    """Sister regression to the /verify case. Same setup: primary key
+    alive, family set deleted. ``/refresh`` must return 401 AND must
+    NOT emit a Set-Cookie (would otherwise re-mint a session that the
+    Lua rotation guard would have rejected)."""
+    await _seed_user(session_factory)
+    app = _make_app(session_factory)
+    with TestClient(app) as client:
+        token = _login(client)
+        jti, sid = decode_refresh_jti_sid(token)
+
+        # Round A simulation.
+        del fake_redis._sets[f"auth:session:by_sid:{sid}"]
+
+        refresh = client.post(
+            "/api/v1/auth/refresh", cookies={"refresh_token": token}
+        )
+    assert refresh.status_code == 401, refresh.json()
+    # No Set-Cookie on a rejected refresh.
+    assert _canonical_refresh_cookie(refresh.headers) is None
+
+
+async def test_logout_round_a_succeeds_round_b_fails_revocation_still_holds(
+    session_factory, fake_redis, monkeypatch
+):
+    """Architect P1 follow-up: the strongest version of the regression
+    — simulate the actual interleave the architect named. Logout's
+    Round A lands (family set deleted), but Round B (primary +
+    grace-key cleanup) raises mid-flight, leaving orphaned primary
+    keys behind. The pre-logout cookie MUST NOT verify against the
+    orphan primary."""
+    seed = await _seed_user(session_factory)
+    app = _make_app(session_factory)
+    with TestClient(app) as client:
+        token = _login(client)
+        jti, sid = decode_refresh_jti_sid(token)
+
+        # Patch ``session_revoke_family`` so Round A runs (family set
+        # gets deleted) but Round B raises before deleting primaries.
+        import app.redis_client as rc
+        from redis.exceptions import RedisError
+
+        original = rc.session_revoke_family
+
+        async def half_revoke(target_sid: str):
+            # Round A: actually delete the family set (the bug-class
+            # invariant we're testing — primary keys must NOT be the
+            # authority once the family is gone).
+            fake_redis._sets.pop(f"auth:session:by_sid:{target_sid}", None)
+            # Round B: simulate failure (network drop, OOM, anything).
+            raise RedisError("simulated Round B failure")
+
+        monkeypatch.setattr(rc, "session_revoke_family", half_revoke)
+
+        access = create_access_token(
+            seed["user_id"], seed["org_id"], Role.OWNER.value
+        )
+        # The logout handler is fail-open by design (spec §7.1): a
+        # ``RedisError`` from ``session_revoke_family`` is caught,
+        # ``redis_partial_revoke=True`` is flagged in the audit detail,
+        # the cookie is still cleared, and the response is 200. The
+        # orphan primary remains in Redis — exactly the half-revoked
+        # state we want to test against.
+        logout = client.post(
+            "/api/v1/auth/logout",
+            cookies={"refresh_token": token},
+            headers={"Authorization": f"Bearer {access}"},
+        )
+        assert logout.status_code == 200
+
+        # Round A landed (family set was deleted by ``half_revoke``)
+        # but Round B's primary cleanup never ran.
+        assert f"auth:session:by_sid:{sid}" not in fake_redis._sets, (
+            "Test prerequisite: Round A must have deleted the family "
+            "set before Round B raised"
+        )
+        assert f"auth:session:{jti}" in fake_redis._kv, (
+            "Test prerequisite: the orphan primary must remain to "
+            "exercise the membership-check path"
+        )
+
+        # Restore the real helper so subsequent calls work normally.
+        monkeypatch.setattr(rc, "session_revoke_family", original)
+
+        # The orphaned cookie must NOT verify and must NOT refresh,
+        # even though the primary key is still alive. The
+        # membership check is what enforces this.
+        verify = client.post(
+            "/api/v1/auth/verify", cookies={"refresh_token": token}
+        )
+        assert verify.status_code == 401, verify.json()
+
+        refresh = client.post(
+            "/api/v1/auth/refresh", cookies={"refresh_token": token}
+        )
+        assert refresh.status_code == 401, refresh.json()
+        assert _canonical_refresh_cookie(refresh.headers) is None

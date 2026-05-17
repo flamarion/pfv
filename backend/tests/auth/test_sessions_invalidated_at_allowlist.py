@@ -1,9 +1,9 @@
-"""Grep-style regression: pin every write of ``sessions_invalidated_at``.
+"""AST-level regression: pin every write of ``sessions_invalidated_at``.
 
 Operator decision Q6 in
 ``specs/2026-05-17-backend-session-model.md`` §11: after PR 4 of the
 backend-session-model series, the only sites that should write
-``sessions_invalidated_at = now()`` are the FIVE global-invalidation
+``sessions_invalidated_at = now()`` are the global-invalidation
 triggers enumerated in spec §6. The 2026-05-16 false-logout incident
 class was caused by ``/auth/logout`` using this global-cutoff
 mechanism for what should have been a per-session revoke; PR 4
@@ -12,163 +12,248 @@ revocation in Redis.
 
 This test fails if a future PR ever:
 
-  * adds a NEW write of ``sessions_invalidated_at`` outside the
-    allowlist below (the regression bug class), OR
-  * removes one of the allowlisted write sites without updating this
-    file (forcing the author to make an explicit decision rather
-    than silently dropping the cutoff).
+  * adds a NEW write of ``sessions_invalidated_at`` in a function
+    outside the allowlist below (the regression bug class), OR
+  * removes one of the allowlisted writes without updating this file
+    (forcing the author to make an explicit decision rather than
+    silently dropping the cutoff).
 
-If a future PR genuinely needs to add a sixth global-cutoff trigger,
+Architect feedback on PR #308: the original version of this test was
+**file-level** — it asserted that writes lived in the four allowed
+files, but a new write added inside one of those files would have
+slipped through unnoticed. This version uses an AST walk to pin each
+write at the ``(file, function)`` granularity instead. A new write
+added inside ``routers/auth.py::reset_password`` is allowed; a new
+write inside ``routers/auth.py::logout`` (the false-logout class) is
+not. Same for every other allowlisted module.
+
+If a future PR genuinely needs to add a new global-cutoff trigger,
 the fix is to update :data:`ALLOWED_WRITE_SITES` with a comment
-citing the new trigger's purpose. Do NOT extend the regex to a
-narrower pattern just to dodge this test — the breadth is load
-bearing.
+citing the new trigger's purpose. Do NOT broaden the AST pattern to
+a narrower check just to dodge this test — the breadth is
+load-bearing.
 """
 from __future__ import annotations
 
-import re
+import ast
+from dataclasses import dataclass
 from pathlib import Path
 
 
 BACKEND_APP = Path(__file__).resolve().parents[2] / "app"
 
 
-# ── Allowlist — spec §6 trigger set ─────────────────────────────────────────
+# ── Allowlist — spec §6 trigger set, function-level ─────────────────────────
 #
-# Each entry is a ``(relative_path, justification)`` tuple. Paths are
-# rooted at ``backend/app/``. Multiple writes inside the same file are
-# allowed; the test only checks set-membership at the file granularity.
+# Each entry is a ``(relative_path, function_name, justification)``
+# tuple. Paths are rooted at ``backend/app/``. Multiple writes inside
+# the same function are allowed (the function still counts as one
+# entry); each distinct ``(file, function)`` pair must appear once.
 #
 # Why each entry exists (see spec §6 for the canonical table):
 #
-#   * routers/auth.py
-#       Site: ``POST /auth/reset-password``. Resetting the password
-#       must kill every existing session — an attacker who held a
-#       refresh JWT before the reset cannot survive past it. Pairs
-#       with ``password_changed_at``.
+#   * routers/auth.py::reset_password
+#       ``POST /auth/reset-password``. Resetting the password must
+#       kill every existing session — an attacker who held a refresh
+#       JWT before the reset cannot survive past it.
 #
-#   * routers/users.py
-#       Two sites: ``PUT /users/me`` (email change) and
-#       ``PUT /users/me/password`` (in-app password change). Both
-#       are credential-grade mutations that must invalidate every
-#       JWT issued earlier.
+#   * routers/users.py::update_profile
+#       ``PUT /users/me`` email change. Email is part of the identity
+#       contract; a change must invalidate every JWT issued earlier.
 #
-#   * services/invitation_service.py
-#       Two sites: accept-invitation (joins / re-joins an org and
-#       must drop sessions tied to the previous membership state)
-#       and role-swap inside an invitation flow (privilege boundary
-#       changes between issuance and acceptance).
+#   * routers/users.py::change_password
+#       ``PUT /users/me/password`` in-app password change. Credential-
+#       grade mutation; every prior JWT dies.
 #
-#   * services/admin_org_members_service.py
-#       Site: admin deactivates a member. Must immediately kill the
-#       deactivated user's outstanding sessions so they cannot keep
-#       making API calls during the access-token's remaining TTL.
+#   * services/invitation_service.py::accept_invitation
+#       Joins / re-joins an org. Drops sessions tied to the previous
+#       membership state.
 #
-# routers/auth.py's ``POST /auth/logout`` was REMOVED from this set
-# in PR 4 — per-session logout via Redis family revoke replaced it.
-# That removal is the load-bearing change this regression pins.
+#   * services/invitation_service.py::remove_member
+#       Org-member removal flow inside the invitation service. The
+#       removed user's outstanding sessions must die at the moment
+#       of removal so they cannot keep making API calls during the
+#       access-token's remaining TTL.
+#
+#   * services/admin_org_members_service.py::update_member
+#       Admin deactivates a member. Same reasoning as the invitation-
+#       service removal above; the admin path is a separate function.
+#
+# ``routers/auth.py::logout`` was REMOVED from this set in PR 4 —
+# per-session logout via Redis family revoke replaced it. That
+# removal is the load-bearing change this regression pins.
 
-ALLOWED_WRITE_SITES: tuple[tuple[str, str], ...] = (
+ALLOWED_WRITE_SITES: tuple[tuple[str, str, str], ...] = (
     (
         "routers/auth.py",
-        "password reset via token (spec §6: routers/auth.py reset_password)",
+        "reset_password",
+        "password reset via token (spec §6 trigger 1)",
     ),
     (
         "routers/users.py",
-        "email change + in-app password change (spec §6: routers/users.py)",
+        "update_profile",
+        "email change (spec §6 trigger 3)",
+    ),
+    (
+        "routers/users.py",
+        "change_password",
+        "in-app password change (spec §6 trigger 2)",
     ),
     (
         "services/invitation_service.py",
-        "invitation accept / role swap (spec §6)",
+        "accept_invitation",
+        "invitation accept (spec §6 trigger 4a)",
+    ),
+    (
+        "services/invitation_service.py",
+        "remove_member",
+        "invitation flow member removal (spec §6 trigger 4b)",
     ),
     (
         "services/admin_org_members_service.py",
-        "admin deactivates org member (spec §6)",
+        "update_member",
+        "admin deactivates org member (spec §6 trigger 5)",
     ),
 )
 
 
-# ``\.sessions_invalidated_at\s*=`` catches every assignment shape we
-# care about: ``user.sessions_invalidated_at = ...``,
-# ``target.sessions_invalidated_at = utcnow_naive()``,
-# ``existing.sessions_invalidated_at = now``. The leading ``\.`` rules
-# out comment-only mentions, docstring references, the column
-# declaration in ``models/user.py``, and the dict access in
-# ``admin_users_search_service.py`` (which reads, never writes).
-_WRITE_PATTERN = re.compile(r"\.sessions_invalidated_at\s*=")
+@dataclass(frozen=True)
+class WriteSite:
+    """One ``obj.sessions_invalidated_at = ...`` write found in the
+    source tree.
 
-
-def _python_files() -> list[Path]:
-    """Walk ``backend/app/`` collecting every ``*.py`` file."""
-    return sorted(BACKEND_APP.rglob("*.py"))
-
-
-def _find_write_sites() -> set[str]:
-    """Return the set of relative paths (under ``backend/app/``) that
-    contain at least one write to ``sessions_invalidated_at``.
-
-    We deliberately compare at the file level — a single file may host
-    multiple write sites (``routers/users.py`` has email-change +
-    password-change; ``services/invitation_service.py`` has
-    accept + role-swap), and bookkeeping per-line would make the
-    allowlist brittle to ordinary refactors.
+    ``file`` is relative to ``backend/app/``. ``function`` is the name
+    of the innermost enclosing ``def`` / ``async def``; ``__module__``
+    for top-level writes (we don't expect any but the placeholder
+    keeps the comparison total). ``lineno`` is the assignment's start
+    line in the source file — purely informational, not used in
+    set-equality.
     """
-    found: set[str] = set()
-    for path in _python_files():
+
+    file: str
+    function: str
+    lineno: int
+
+
+def _enclosing_function(parents: list[ast.AST]) -> str:
+    """Return the name of the innermost enclosing function in
+    ``parents`` (deepest-first traversal stack), or ``"__module__"`` if
+    none. Class definitions are skipped — a write inside a method of
+    ``class X: def f(self): self.sessions_invalidated_at = ...``
+    reports ``f``, not ``X``."""
+    for node in reversed(parents):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return node.name
+    return "__module__"
+
+
+def _find_write_sites() -> list[WriteSite]:
+    """Walk every ``.py`` file under ``backend/app/`` and collect every
+    ``Attribute`` assignment whose attribute name is
+    ``sessions_invalidated_at``.
+
+    Only ``ast.Assign`` is matched — ``ast.AnnAssign`` (the
+    ``mapped_column`` declaration in ``models/user.py``) and
+    ``ast.AugAssign`` (`+=` etc., which we never use here) are
+    excluded by construction. Attribute-target match catches
+    ``user.sessions_invalidated_at = ...``,
+    ``target.sessions_invalidated_at = utcnow_naive()``, and the like.
+    Comparisons and other read-only uses are not ``Assign`` nodes and
+    are correctly ignored.
+    """
+    sites: list[WriteSite] = []
+    for path in sorted(BACKEND_APP.rglob("*.py")):
         try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
+        except (OSError, SyntaxError):
             continue
-        for line in text.splitlines():
-            if _WRITE_PATTERN.search(line):
-                # The model file declares the column; skip it.
-                stripped = line.lstrip()
-                if stripped.startswith("#"):
-                    continue
-                if "Mapped[" in line or "mapped_column" in line:
-                    # Column declaration in models/user.py — read-only.
-                    continue
-                found.add(str(path.relative_to(BACKEND_APP)))
-                break
-    return found
+
+        # Depth-first walk with an explicit parent stack so the
+        # enclosing function is unambiguous at every Assign node.
+        rel_path = str(path.relative_to(BACKEND_APP))
+
+        def visit(node: ast.AST, parents: list[ast.AST]) -> None:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    # ``a, b = ...`` lands a Tuple; unwrap.
+                    candidates: list[ast.expr] = (
+                        list(target.elts)
+                        if isinstance(target, (ast.Tuple, ast.List))
+                        else [target]
+                    )
+                    for candidate in candidates:
+                        if (
+                            isinstance(candidate, ast.Attribute)
+                            and candidate.attr == "sessions_invalidated_at"
+                        ):
+                            sites.append(
+                                WriteSite(
+                                    file=rel_path,
+                                    function=_enclosing_function(parents),
+                                    lineno=node.lineno,
+                                )
+                            )
+            for child in ast.iter_child_nodes(node):
+                visit(child, parents + [node])
+
+        visit(tree, [])
+    return sites
 
 
-def test_sessions_invalidated_at_write_sites_match_spec_section_6():
-    """Every write site lives in the spec §6 allowlist, nothing else.
+def test_sessions_invalidated_at_writes_match_spec_section_6():
+    """Every write to ``sessions_invalidated_at`` is in spec §6's
+    function-level allowlist, and every allowlisted function still
+    contains the write.
 
-    Two assertions, intentionally separate so a future failure points
+    Two assertions intentionally separate so a future failure points
     cleanly at one direction:
 
-      * MISSING — an expected site was removed. Likely a refactor
-        broke the global-cutoff contract for that trigger. Re-add
-        the write OR explicitly drop the entry from the allowlist
-        with a justification.
-      * UNEXPECTED — a new file added a write outside the allowlist.
-        Either remove the write (the per-session revoke in Redis is
-        the right answer for non-credential-grade flows) OR extend
-        the allowlist with a justification comment.
+      * MISSING — an expected ``(file, function)`` pair was removed.
+        Likely a refactor broke the global-cutoff contract for that
+        trigger. Re-add the write OR explicitly drop the entry from
+        the allowlist with a justification.
+      * UNEXPECTED — a new write appeared in a function outside the
+        allowlist. The 2026-05-16 false-logout incident class. Either
+        remove the write (the per-session revoke in
+        ``redis_client.session_revoke_family`` is the right answer
+        for non-credential-grade flows) OR extend the allowlist with
+        a justification comment.
     """
-    allowed = {site for site, _ in ALLOWED_WRITE_SITES}
-    found = _find_write_sites()
+    expected: set[tuple[str, str]] = {
+        (rel_path, fn) for rel_path, fn, _ in ALLOWED_WRITE_SITES
+    }
+    found_sites = _find_write_sites()
+    found: set[tuple[str, str]] = {(s.file, s.function) for s in found_sites}
 
-    missing = allowed - found
+    missing = expected - found
     assert not missing, (
-        f"Expected write sites in spec §6 are missing from the codebase: "
-        f"{sorted(missing)}. Either the trigger was removed (in which case "
-        "drop the entry from ALLOWED_WRITE_SITES with a justification) or "
-        "the file moved (in which case update the path)."
+        "Expected (file, function) write sites in spec §6 are missing "
+        f"from the codebase: {sorted(missing)}. Either the trigger was "
+        "removed (in which case drop the entry from "
+        "ALLOWED_WRITE_SITES with a justification) or the function "
+        "was renamed (in which case update the allowlist)."
     )
 
-    unexpected = found - allowed
-    assert not unexpected, (
-        "Unexpected write site(s) for ``sessions_invalidated_at`` outside "
-        f"the spec §6 allowlist: {sorted(unexpected)}. "
-        "Per spec §5.3 + §6, only the five global-invalidation triggers "
-        "may use this cutoff. Per-session revoke goes through "
-        "``redis_client.session_revoke_family`` instead. If this addition "
-        "is intentional, extend ALLOWED_WRITE_SITES with a justification "
-        "comment citing the new trigger's purpose."
-    )
+    unexpected = found - expected
+    if unexpected:
+        # Surface the actual file:line for each offender so the
+        # operator can locate them without grepping.
+        details = "\n".join(
+            f"  - {s.file}:{s.lineno} inside {s.function}"
+            for s in found_sites
+            if (s.file, s.function) in unexpected
+        )
+        raise AssertionError(
+            "Unexpected ``sessions_invalidated_at`` write(s) outside the "
+            "spec §6 allowlist:\n"
+            f"{details}\n"
+            "Per spec §5.3 + §6, only the enumerated global-invalidation "
+            "triggers may use this cutoff. Per-session revoke goes through "
+            "``redis_client.session_revoke_family`` instead. If this "
+            "addition is intentional, extend ALLOWED_WRITE_SITES with a "
+            "justification comment citing the new trigger's purpose."
+        )
 
 
 def test_auth_logout_handler_no_longer_writes_cutoff():
@@ -176,29 +261,30 @@ def test_auth_logout_handler_no_longer_writes_cutoff():
 
     PR 4 of the backend-session-model series removed the
     ``user.sessions_invalidated_at = ...`` write from the
-    ``POST /auth/logout`` handler. The grep above already catches a
-    regression at the file-set level, but this assertion is narrower:
-    the logout handler body specifically must not write this column.
-    A future PR that re-adds the write to ``routers/auth.py`` would
-    still pass the grep above (the file is allowlisted because of
-    ``reset_password``), so we read the handler body directly.
+    ``POST /auth/logout`` handler. The AST-level grep above already
+    catches a regression at the function-set level (any future write
+    inside ``routers/auth.py::logout`` would appear as an unexpected
+    site), but this narrower assertion is kept as belt-and-braces:
+    a brand-new helper function inside ``routers/auth.py`` that
+    happens to be called from ``logout`` would not be caught by the
+    function-name allowlist alone, and we want the logout PATH to
+    stay clean regardless of which function in the file does the
+    write.
     """
     auth_path = BACKEND_APP / "routers" / "auth.py"
-    text = auth_path.read_text(encoding="utf-8")
+    source = auth_path.read_text(encoding="utf-8")
 
-    # Slice from ``async def logout`` to the next top-level ``def`` /
-    # ``async def`` / ``@router.`` decorator. Crude but effective —
-    # the handler is small and self-contained.
-    lines = text.splitlines()
+    # Slice the handler body from ``async def logout(`` to the next
+    # top-level ``def`` / ``async def`` / ``@router.`` decorator.
+    lines = source.splitlines()
     in_body = False
     handler_body: list[str] = []
-    for idx, line in enumerate(lines):
+    for line in lines:
         if not in_body:
             if line.startswith("async def logout(") or line.startswith("def logout("):
                 in_body = True
                 handler_body.append(line)
             continue
-        # Terminate at the next decorator or top-level def/async def.
         if line.startswith("@router.") or (
             line.startswith("def ") or line.startswith("async def ")
         ):

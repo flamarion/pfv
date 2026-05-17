@@ -594,6 +594,41 @@ async def _validate_single_refresh_token(
             detail="Session has been invalidated",
         )
 
+    # Architect P1 finding on PR #308: family-set membership is the
+    # authoritative revocation contract, not primary-key existence.
+    # The Lua rotation script enforces ``SISMEMBER by_sid {jti}`` on
+    # ``/refresh`` (spec §4.2 step 5 check 1), but ``/verify`` does
+    # NOT run the Lua, so without this check a verify call could
+    # accept a primary key whose family set has already been deleted
+    # by Round A of a concurrent logout.
+    #
+    # The window is small but real:
+    #   * Logout Round A deletes ``auth:session:by_sid:{sid}``.
+    #   * Logout Round B deletes the primary + grace keys for every
+    #     jti, but is a separate MULTI/EXEC; a Redis connection drop
+    #     between the two rounds leaves primary keys orphaned.
+    #   * Any ``/verify`` arriving in that window with the
+    #     pre-logout cookie used to silently succeed.
+    #
+    # Apply only on the primary path; the grace path (above) already
+    # gates on ``session_family_exists``. The membership check is
+    # stronger than family-exists because it also catches the
+    # impossible-but-NX-defended ``jti`` collision where two sessions
+    # share a ``sid`` but only one ``jti`` is in the family set.
+    if redis_state == "primary":
+        try:
+            in_family = await redis_client.session_family_member(sid, jti)
+        except (RedisRequired, RedisError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=SESSION_REDIS_UNAVAILABLE_DETAIL,
+            ) from exc
+        if not in_family:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session has been invalidated",
+            )
+
     # Enforce absolute session lifetime (per-org setting or system default)
     session_created_at = payload.get("session_created_at")
     session_start: datetime | None = None

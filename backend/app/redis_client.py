@@ -213,6 +213,34 @@ async def session_family_exists(sid: str) -> bool:
     return bool(await client.exists(_family_key(sid)))
 
 
+async def session_family_member(sid: str, jti: str) -> bool:
+    """Return True iff ``jti`` is still a member of ``auth:session:by_sid:{sid}``.
+
+    Architect P1 finding on PR #308: the per-session logout makes
+    ``DEL auth:session:by_sid:{sid}`` the load-bearing revocation
+    step (Round A of the logout family revoke). Primary keys are
+    cleaned up afterwards in Round B. Between Round A landing and
+    Round B finishing — or if Round B partially fails — a request
+    could find a still-alive ``auth:session:{jti}`` even though the
+    session is logically revoked.
+
+    The Lua rotation script catches this on ``/refresh`` via its own
+    ``SISMEMBER`` guard (spec §4.2 step 5 check 1). But ``/verify``
+    does NOT run the Lua, and the primary-key probe in
+    ``_validate_single_refresh_token`` historically only checked
+    existence + ``{user_id, sid}`` binding. Membership in the
+    family set is the actual authoritative check; this helper
+    mirrors the Lua contract for callers that do not run Lua.
+
+    Stronger than ``session_family_exists`` because it also catches
+    the impossible-but-NX-defended ``jti`` collision case where two
+    sessions happen to share a ``sid`` but only one's ``jti`` is in
+    the family set.
+    """
+    client = require_client()
+    return bool(await client.sismember(_family_key(sid), jti))
+
+
 # Lua return tokens — spec §4.2 step 5. The router branch table in
 # §5.1 step 6 maps these to HTTP behaviour. The bare string ``"ok"``
 # is returned on the happy path; the three error tokens come back via
