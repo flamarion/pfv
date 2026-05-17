@@ -16,7 +16,7 @@ from app.database import get_db
 from app.deps import get_current_user
 from app.models.user import Organization, Role, User
 from app.rate_limit import limiter
-from app.routers.auth import _clear_legacy_refresh_cookie
+from app.routers.auth import _clear_legacy_refresh_cookie, _issue_refresh_session
 from app.schemas.auth import TokenResponse
 from app.schemas.invitation import (
     InvitationAcceptRequest,
@@ -28,7 +28,6 @@ from app.schemas.invitation import (
 from app.security import (
     create_access_token,
     create_invitation_token,
-    create_refresh_token,
     refresh_cookie_max_age,
 )
 from app.services import invitation_service
@@ -183,7 +182,12 @@ async def accept_invitation(
     await db.commit()
 
     access = create_access_token(user.id, user.org_id, user.role.value)
-    refresh = create_refresh_token(user.id)
+    # PR 2 (specs/2026-05-17-backend-session-model.md §5.4): write the
+    # Redis primary key + family-set entry BEFORE set_cookie. Fails
+    # closed (503) on unreachable Redis. This is the fifth issue site
+    # — the one PR #305 missed; the architect explicitly enumerated it
+    # in the PR 2 brief.
+    refresh, _jti, _sid = await _issue_refresh_session(user.id)
     response.set_cookie(
         key="refresh_token",
         value=refresh,
