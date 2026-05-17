@@ -177,10 +177,27 @@ too tight against typical network jitter. 30s is the compromise.
 
 ### 2.6 Per-session logout (NEW behaviour)
 
-`POST /auth/logout` deletes ONLY the current session's Redis key
-(`DEL auth:session:{jti}` and the grace key) and clears the cookie.
-It NO LONGER writes `sessions_invalidated_at`. Other tabs and other
-devices remain authenticated.
+`POST /auth/logout` revokes the entire **session family** for the
+calling browser/device — every `jti` ever issued under the same
+`sid`, including any outstanding rotation-grace ticket. It clears
+the refresh cookie. It does NOT write `sessions_invalidated_at`.
+Other devices and other browser profiles remain authenticated.
+
+**Same-browser tab semantics (architect feedback P1.2).** The refresh
+cookie lives in the browser's cookie jar, which is shared across all
+tabs in the same browser profile. Logout clears the cookie for the
+entire profile; the session-family revoke in Redis (Section 4.2)
+makes sure no still-in-flight refresh from a sibling tab in that
+same profile can re-authenticate. So "per-session logout" means
+**this refresh-cookie session / device**, NOT "this one tab" — that
+was the wording error in the earlier draft. Other tabs in the same
+browser will continue to render using their in-memory access token
+until that token expires (15 min TTL); after expiry their next API
+call hits 401 + the refresh attempt also 401s + the user is sent to
+`/login`. If we want sibling tabs to react immediately, that is a
+frontend `BroadcastChannel("auth")` follow-up — it does not keep
+them signed in, it just speeds up their redirect-to-`/login`. Out of
+scope for this spec.
 
 ### 2.7 Global invalidation (UNCHANGED)
 
@@ -222,37 +239,118 @@ target).
 
 | Key | Type | TTL | Value | Set by | Deleted by |
 |-----|------|-----|-------|--------|-----------|
-| `auth:session:{jti}` | string | `refresh_idle_ttl_days` | `"{user_id}"` | every login + every successful `/refresh` | per-session `/logout`, expiry |
-| `auth:session:grace:{jti}` | string | 30s (rotation grace) | `"{user_id}"` | on `/refresh` rotation BEFORE the new key is written | natural expiry only |
+| `auth:session:{jti}` | string | `refresh_idle_ttl_days` | JSON `{"user_id": int, "sid": "<session_id>"}` | every login (new `sid`) + every successful `/refresh` rotation (same `sid`) | per-session `/logout` (deletes EVERY key for this `sid`), expiry |
+| `auth:session:grace:{jti}` | string | 30s (rotation grace) | JSON `{"user_id": int, "sid": "<session_id>", "successor_jti": "<new_jti>"}` | on `/refresh` rotation BEFORE the new key is written | per-session `/logout` (deletes EVERY key for this `sid` via the index below), expiry |
+| `auth:session:by_sid:{sid}` | set | `refresh_idle_ttl_days` (refreshed on every rotation) | every `jti` issued for this `sid` | every login + every rotation | per-session `/logout`, expiry |
 
-The grace key's value is just `"{user_id}"` so the resolver can
-sanity-check the JWT `sub` matches. We deliberately do NOT chain the
-grace key to the successor `jti`. The downstream effect: a token
-within its grace window is accepted but the rotation does NOT itself
-re-rotate (returning the access token only) so a paranoid attacker
-who steals an in-flight pre-rotation cookie cannot use it as a
-rotation oracle. See Section 5.1.
+**Session-family `sid` (architect feedback on PR #301, P1.1.)** Each
+login mints a fresh opaque `session_id` (UUID4, written into the JWT
+as the `sid` claim — see Section 3.1) that is **stable across the
+rotation chain**: every `/refresh` issues a NEW `jti` but carries the
+SAME `sid`. The per-`sid` Redis set indexes every `jti` ever issued
+under that session so logout can revoke the entire family (current
+primary + any outstanding grace ticket from the just-rotated
+predecessor + any in-flight rotation that has not yet landed).
+Without this family link, the original spec's logout could leave a
+30-second window where a pre-rotation cookie still authenticates.
+
+The grace key's value carries the `successor_jti` so that, once
+logout has run and the primary key is gone, the resolver can
+distinguish "grace key for a session that was just rotated normally"
+(should accept, briefly) from "grace key whose entire family was
+just logged out" (should reject). The logout path deletes ALL keys
+for the `sid` atomically (Section 5.3); the resolver also performs a
+defence-in-depth check against the `by_sid` set on every grace-path
+acceptance (Section 5.1 step 4). We deliberately do NOT issue a
+fresh cookie on the grace path (no rotation oracle) — see
+Section 5.1.
 
 ### 4.2 Operation patterns
 
-- **Login:** `SET auth:session:{new_jti} {user_id} EX {refresh_idle_ttl_days * 86400} NX`. Always succeeds because `jti` is random.
+All multi-key mutations use `MULTI/EXEC` (architect feedback P1.3 —
+the original three-step rotation was not safe; if `DEL` of the old
+primary failed after the new key was written, the old refresh token
+remained primary-valid for the full idle TTL, not just 30 seconds).
+
+- **Login:** mint fresh `sid` (UUID4). In one `MULTI/EXEC`: `SET auth:session:{new_jti}` (with `{user_id, sid}` JSON value), `SADD auth:session:by_sid:{sid} {new_jti}`, `EXPIRE auth:session:by_sid:{sid} {idle_ttl}`. All atomic; on EXEC failure the client receives 503 and retries (Section 7.1).
+
 - **Refresh:**
-    1. Resolve the inbound `jti` from the JWT.
-    2. `GET auth:session:{jti}` first. If hit, normal path: rotate.
-    3. If miss, `GET auth:session:grace:{jti}`. If hit, grace path: issue a new access token but do NOT rotate.
-    4. If both miss, 401.
-    5. On rotate, the order is: (a) `SET auth:session:grace:{old_jti} {user_id} EX 30`, (b) `SET auth:session:{new_jti} {user_id} EX {refresh_idle_ttl_days * 86400}`, (c) `DEL auth:session:{old_jti}`. The grace key is written FIRST so a crash between (b) and (c) cannot leave both the old primary AND no grace, which would make a concurrent racing tab fail.
-- **Logout:** `DEL auth:session:{jti}` and `DEL auth:session:grace:{jti}` in a `MULTI/EXEC` so partial failure does not leave a stale grace ticket alive.
+    1. Resolve `jti` and `sid` from the JWT.
+    2. `GET auth:session:{jti}` first. If hit, normal path: rotate (step 5).
+    3. If miss, `GET auth:session:grace:{jti}`. If hit, grace path: step 4.
+    4. **Grace-path defence-in-depth (architect feedback P1.1).** Before accepting the grace ticket, also `EXISTS auth:session:by_sid:{sid}`. If the family set is gone (logout ran since the rotation), reject with 401 even though the grace key itself has not yet expired. Otherwise: issue an access token only. Do NOT rotate (no new refresh cookie — no rotation oracle).
+    5. **Rotate (normal path), one `MULTI/EXEC`:**
+       ```
+       MULTI
+         SET auth:session:grace:{old_jti}
+           {"user_id":..,"sid":..,"successor_jti":{new_jti}} EX 30
+         SET auth:session:{new_jti}
+           {"user_id":..,"sid":..} EX {refresh_idle_ttl_days*86400}
+         SADD auth:session:by_sid:{sid} {new_jti}
+         EXPIRE auth:session:by_sid:{sid} {refresh_idle_ttl_days*86400}
+         DEL auth:session:{old_jti}
+       EXEC
+       ```
+       Redis aborts on connection drop before `EXEC` lands, so partial application is not possible. If EXEC errors, the pre-rotation state is fully preserved; client gets 503 and retries.
+    6. If primary AND grace both miss, 401.
+
+- **Logout (per-session, architect feedback P1.1 — atomic family revoke):**
+    1. Read every refresh cookie value via `_extract_refresh_cookies`. Decode each, extract the `sid`. Typical case: one `sid` (single browser, single cookie).
+    2. For each distinct `sid`:
+       ```
+       -- Step 1: read the family + delete the set in one transaction
+       MULTI
+         SMEMBERS auth:session:by_sid:{sid}
+         DEL auth:session:by_sid:{sid}
+       EXEC
+       -- Step 2: for each jti returned, delete primary + grace keys
+       MULTI
+         DEL auth:session:{jti_1}
+         DEL auth:session:grace:{jti_1}
+         DEL auth:session:{jti_2}
+         DEL auth:session:grace:{jti_2}
+         ...
+       EXEC
+       ```
+       After step 1 the family set is gone, so step 4 of the refresh path (`EXISTS by_sid:{sid}`) returns 0 and rejects any in-flight grace ticket — even if its 30s TTL has not yet expired and step 2 has not yet run. That closes the architect's reported logout/grace bug.
+    3. Clear the cookie at `Path=/` and the legacy path via the existing `_clear_legacy_refresh_cookie` helper.
+    4. DO NOT touch `sessions_invalidated_at` (that's the global-invalidation path; see Section 6).
+    5. Emit audit event `auth.session.terminated`. Outcome=success even when 0 jtis were found (anonymous logout is still a clean cookie clear).
+
 - **Global invalidation:** unchanged. Writes to `sessions_invalidated_at` and the resolver's `iat < token_cutoff` check kill every JWT issued before that moment regardless of Redis state. We do NOT bulk-delete Redis keys on global invalidation: the DB cutoff is authoritative, and the orphan keys age out via their TTL.
 
-### 4.3 Why no Lua
+### 4.3 Why MULTI/EXEC, not Lua
 
-The patterns above are short, the failure modes are bounded, and the
-existing `redis_client.py` already handles connection retries. A Lua
-script would be needed only if we wanted atomic rotate-and-grace in a
-single round trip; the three-step rotation in 4.2 above is correct
-even if any individual step fails (Section 7.1 covers the failure
-modes).
+Earlier draft said "Lua not needed, three-step rotate is correct
+even if individual steps fail." Architect P1.3 corrected this: the
+sequential three-step shape is **not** safe under partial failure
+(specifically, if `DEL old_primary` fails after `SET new_primary`
+the old `jti` accepts as primary for the full idle TTL). The
+revised design uses `MULTI/EXEC` for every multi-key mutation, which
+Redis guarantees as atomic-or-aborted-on-disconnect. That covers
+rotation, login, and logout.
+
+A Lua script is recommended only if a future iteration wants
+**conditional rotate** semantics — for example, refusing to write
+a successor when a concurrent logout has just deleted the family
+set. Sketch (post-launch follow-up):
+
+```lua
+-- KEYS[1]=auth:session:{old_jti}
+-- KEYS[2]=auth:session:grace:{old_jti}
+-- KEYS[3]=auth:session:{new_jti}
+-- KEYS[4]=auth:session:by_sid:{sid}
+if redis.call("EXISTS", KEYS[4]) == 0 then return {err="session_revoked"} end
+redis.call("SET", KEYS[2], ARGV[3], "EX", ARGV[1])
+redis.call("SET", KEYS[3], ARGV[4], "EX", ARGV[2])
+redis.call("SADD", KEYS[4], string.match(KEYS[3], "auth:session:(.*)"))
+redis.call("EXPIRE", KEYS[4], ARGV[2])
+redis.call("DEL", KEYS[1])
+return "ok"
+```
+
+Defer until post-launch; the family-set check in step 4 of the
+refresh path covers the architect's P1.1 concern without it.
 
 ## 5. Endpoint behaviour
 
@@ -499,21 +597,51 @@ For each of the five sites in Section 6:
 - WHEN the global-invalidation trigger fires (password change, password reset, email change, admin deactivate, invitation accept)
 - THEN the next `/refresh` returns 401 with `"Session has been invalidated"`.
 
-### Redis unavailable behaviour
+### Redis unavailable behaviour (architect feedback P2 — explicit in every runtime)
 
 For each endpoint (`/login`, `/refresh`, `/verify`):
 
-- GIVEN `REDIS_URL` is empty AND `app_env=production`
-- THEN response is 503 (not 200, not 401).
+- GIVEN Redis is unreachable in **any** runtime (production, dev, CI) once PR 2 has shipped
+- THEN response is 503. There is no fail-open path.
 
 For `/auth/logout`:
 
-- GIVEN `REDIS_URL` is empty
-- THEN response is 200, cookie is cleared, body includes a soft diagnostic flag.
+- GIVEN Redis is unreachable
+- THEN response is 200 and the cookie is still cleared (best-effort cookie cleanup is safer than refusing to log out). Response body includes `{"redis_partial_revoke": true}` so the frontend can show a soft notice.
+
+**Dev requirement after PR 2.** The existing rate-limit fail-open
+(PR #285's `FailOpenRedisStorage`) was justified because rate limits
+are a defensive bonus — graceful degradation is preferable to
+service interruption. **Auth sessions are different**: they are the
+primary trust boundary, and a fail-open path lets stolen-credential
+windows persist indefinitely. After PR 2 ships, **local dev must
+run Redis**. The existing `./pfv start` already brings Redis up; no
+operator change required. Tests use a fake Redis fixture
+(`fakeredis` or equivalent) — call it out in the Section 9 test
+plan so Team I doesn't introduce a real-Redis test dependency in
+unit-test mode.
+
+Code-wise, this means Team I should use `redis_client.require_client()`
+(or equivalent) at every callsite that touches `auth:session:*`,
+never an optional / try/except-around-None pattern.
 
 ### Concurrent rotation (no double-issue)
 
 - Two concurrent `/refresh` calls carrying the same `jti_A` should produce: (a) one rotation, (b) one grace acceptance, (c) zero 401s. Pin with `asyncio.gather`.
+
+### Logout-after-rotation revokes the entire family (architect P1.1)
+
+- GIVEN a user logs in (sid=S1, primary jti=A), then rotates (primary jti=B, grace jti=A still valid for 30s)
+- AND a sibling tab still holds the pre-rotation refresh cookie carrying `jti=A`
+- WHEN the user logs out using the current cookie (jti=B)
+- THEN `/refresh` with the pre-rotation `jti=A` returns 401, even within the 30s grace window. The family-set delete in logout step 1 makes the resolver's step-4 `EXISTS auth:session:by_sid:{sid}` check fail.
+- Without the family-set guard, the old test would have shown jti=A accepted via grace and a fresh access token issued AFTER logout — that is the architect's reported bug.
+
+### Atomic rotation under partial Redis failure (architect P1.3)
+
+- GIVEN Redis connection drops mid-rotation
+- THEN no client observes "old primary still works AND new primary also works" (the MULTI/EXEC aborts on disconnect; both pre-rotation and post-rotation states are reachable, but never both simultaneously).
+- Pin by mocking the Redis client to simulate disconnect between SET new_primary and DEL old_primary; assert the next refresh attempt with old_jti either succeeds (transaction aborted) OR fails with 401 (transaction committed), but never that old_jti is accepted as primary AFTER another /refresh successfully used new_jti.
 
 ### Settings validation
 
@@ -563,18 +691,20 @@ GIVEN an org sets `session_lifetime_days=60`, WHEN a user logs in and
 remains active for 61 days, THEN their next `/refresh` after the
 61-day mark is rejected and they are redirected to `/login`.
 
-## 11. Open questions for the operator
+## 11. Operator decisions (resolved during PR #301 architect review)
 
-1. **`refresh_idle_ttl_days` default: 30 days vs 60 days?** The earlier memo (project_session_lifetime_60d.md) mentioned 60d as the operator's mental model. Choosing 30 keeps the cookie and the absolute cap aligned by default; choosing 60 means a user has to re-auth on the absolute-cap rule, not the idle one, which is the intended UX. The spec defaults to 30 to match the existing `session_lifetime_days` default, but the operator may prefer 60.
+Each open question now has the operator's answer. Team I builds against these.
 
-2. **Grace window length: 30s vs 60s vs 5min?** 30s is comfortable for cross-tab races (the dominant case) and tight against theft. 5min would also cover an offline-to-online transition (e.g. laptop wake from sleep where the cookie store has not yet synced) at the cost of a wider window. No data yet on how often offline transitions produce this failure pattern.
+1. **`refresh_idle_ttl_days` default: ANSWERED — 30 days.** Keep `session_lifetime_days` default at 30 too. Idle TTL and absolute lifetime are different controls and stay distinct. The operator's test org can use the existing per-org `session_lifetime_days` override to set 60 for their own testing without changing global idle behavior.
 
-3. **Per-org override of `refresh_idle_ttl_days`?** Section 2.3 keeps `session_lifetime_days` org-overridable (already supported). Do we want the same for the idle TTL? Punting until an org actually asks for it. Spec records "no" by default.
+2. **Grace window length: ANSWERED — 30 seconds.** Cross-tab race coverage is the dominant concern; theft window stays tight.
 
-4. **Should `/auth/logout` ALSO clear sibling tabs for the same browser?** Per-session logout means tabs of the same browser stay signed in. If the operator wants "logout = this browser, all tabs", we need a separate broadcast mechanism (BroadcastChannel API on the frontend). Out of scope for this spec; calling it out so the operator can decide whether to file a follow-up.
+3. **Per-org override of `refresh_idle_ttl_days`: ANSWERED — no.** Don't add it. Punt until an actual org asks. Spec records "no" by default.
 
-5. **Audit event names: `auth.session.*` vs `session.*` vs `auth.refresh.*`?** This spec proposes `auth.session.rotated`, `auth.session.grace_accept`, `auth.session.terminated`. Aligning with existing `user.login.success` / `auth.google.callback.failed` shape suggests `auth.*` is the right top-level. Confirm with the operator before PR 4.
+4. **Sibling-tab logout semantics: ANSWERED via the P1.2 patch above.** Per-session logout means the refresh-cookie session (this browser profile / device). It does NOT mean "this one tab". Sibling tabs lose access after their current access token expires (15 min). A future frontend `BroadcastChannel("auth")` would speed up their redirect-to-`/login` but does not keep them signed in — out of scope here.
 
-6. **Should the spec ban `sessions_invalidated_at` writes outside the enumerated trigger set (e.g. add a lint rule)?** The 2026-05-16 incident's root cause was that logout incorrectly used the global broadcast mechanism. A grep-based lint that flags new writes outside the allowlist would help future PRs avoid the same trap. Defer to Team I.
+5. **Audit event names: ANSWERED — `auth.session.rotated`, `auth.session.grace_accept`, `auth.session.terminated`.** Locked.
 
-7. **Migration of in-flight QA sessions on the dev stack?** Pre-launch policy says no shim. Confirm operator is OK with QA testers seeing a single 401 after PR 2 ships; they re-log and continue.
+6. **Lint to ban `sessions_invalidated_at` writes outside the allowlist: ANSWERED — yes, add a regression test/allowlist.** Team I adds a grep-style test that fails if any new write site appears outside the enumerated Section 6 trigger list. This is the structural defense against the 2026-05-16 incident class.
+
+7. **In-flight QA reauth wave after PR 2: ANSWERED — acceptable.** Pre-launch QA testers will see a single 401 after PR 2 ships; they re-log and continue. No backcompat shim required.
