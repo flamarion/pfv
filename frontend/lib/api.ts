@@ -1,11 +1,22 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 const DEFAULT_TIMEOUT_MS = 10_000;
-// Auth recovery paths (/auth/refresh, /auth/me) get a longer budget so the
-// first request after a hibernated DO App Platform Basic-XS backend doesn't
-// false-positive the 10s default during TLS handshake + cold container
-// boot. Applied only to the recovery paths; all other endpoints keep the
-// 10s default. See PR fix(frontend) cold-start.
-const RECOVERY_TIMEOUT_MS = 25_000;
+// Auth recovery paths (/auth/refresh, /auth/me, /auth/status) get a
+// longer budget so the first request after a hibernated DO App Platform
+// basic-xxs backend doesn't false-positive during TLS handshake + cold
+// container boot. Applied only to the recovery paths; all other
+// endpoints keep the 10s default.
+//
+// 2026-05-18 idle-recovery: bumped 25s → 45s after the production log
+// (deployment 7506c8ff at 10:32:55) showed /auth/refresh resolving at
+// 28s in the cold-start tail — the previous 25s budget aborted the
+// fetch right when the backend was about to send the response,
+// producing an orphaned 200 in the access log AND a frontend
+// "refresh_transient" 503 whose retry budget then had to recover.
+// The dashboard's silent .catch(() => {}) mount-loaders meant the
+// retry succeeded silently but the original /accounts and /categories
+// requests were never replayed visibly to the user. 45s gives the
+// observed tail enough headroom that a single attempt succeeds.
+const RECOVERY_TIMEOUT_MS = 45_000;
 // Back-compat alias retained for the rest of the module; existing callers
 // reference API_FETCH_TIMEOUT_MS in inline comments.
 const API_FETCH_TIMEOUT_MS = DEFAULT_TIMEOUT_MS;
@@ -45,6 +56,31 @@ type RefreshResult =
   | { ok: true; accessToken: string }
   | { ok: false; kind: "terminal"; status: number }
   | { ok: false; kind: "transient"; error: Error; status?: number };
+
+// 2026-05-18 idle-recovery observability: every refresh attempt AND
+// every retry-after-refresh fires a CustomEvent on window so prod
+// can wire up logging AND tests can assert no swallowed failures.
+// Lightweight — no React, no Suspense, no third-party metrics SDK.
+// Gated on ``typeof window !== "undefined"`` so SSR / vitest jsdom
+// without window doesn't NPE.
+export interface RefreshAttemptDetail {
+  attempt: number;          // 1-indexed: 1 = initial, 2 = 1st retry, 3 = 2nd retry
+  outcome: "ok" | "terminal" | "transient";
+  status?: number;          // HTTP status when known (terminal always; transient sometimes)
+  durationMs: number;       // Wall-clock elapsed for THIS attempt
+}
+
+export interface RetryAfterRefreshDetail {
+  path: string;             // The original 401-ing path (relative to API_URL)
+  status: number;           // Final response status after the retry
+  ok: boolean;              // Convenience: status in [200, 300)
+  durationMs: number;       // Wall-clock elapsed for the retry fetch
+}
+
+function dispatchAuthEvent<T>(name: string, detail: T): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(name, { detail }));
+}
 
 let refreshPromise: Promise<RefreshResult> | null = null;
 // Count of awaiters currently holding the in-flight refreshPromise. Used
@@ -126,11 +162,24 @@ async function fetchWithTimeout(
   }
 }
 
-async function refreshAccessTokenOnce(): Promise<RefreshResult> {
+async function refreshAccessTokenOnce(attempt: number): Promise<RefreshResult> {
+  const startedAt = (typeof performance !== "undefined" ? performance.now() : Date.now());
+  const emit = (result: RefreshResult): RefreshResult => {
+    const durationMs = (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt;
+    const detail: RefreshAttemptDetail = result.ok
+      ? { attempt, outcome: "ok", durationMs }
+      : result.kind === "terminal"
+        ? { attempt, outcome: "terminal", status: result.status, durationMs }
+        : { attempt, outcome: "transient", status: result.status, durationMs };
+    dispatchAuthEvent<RefreshAttemptDetail>("auth:refresh-attempt", detail);
+    return result;
+  };
+
   let res: Response;
   try {
-    // 25s recovery budget (vs 10s default) so a hibernated backend cold
-    // start with TLS handshake + container boot doesn't false-positive.
+    // 45s recovery budget so a hibernated backend cold start with TLS
+    // handshake + container boot doesn't false-positive at the
+    // observed 28s tail. See RECOVERY_TIMEOUT_MS comment.
     res = await fetchWithTimeout(
       `${API_URL}/api/v1/auth/refresh`,
       {
@@ -141,48 +190,48 @@ async function refreshAccessTokenOnce(): Promise<RefreshResult> {
     );
   } catch (err) {
     // ApiTimeoutError, TypeError (network), AbortError -- all transient.
-    return {
+    return emit({
       ok: false,
       kind: "transient",
       error: err instanceof Error ? err : new Error(String(err)),
-    };
+    });
   }
 
   if (res.status === 401 || res.status === 403) {
-    return { ok: false, kind: "terminal", status: res.status };
+    return emit({ ok: false, kind: "terminal", status: res.status });
   }
 
   if (!res.ok) {
-    return {
+    return emit({
       ok: false,
       kind: "transient",
       error: new Error(`refresh returned ${res.status}`),
       status: res.status,
-    };
+    });
   }
 
   let data: { access_token?: string };
   try {
     data = await res.json();
   } catch (err) {
-    return {
+    return emit({
       ok: false,
       kind: "transient",
       error: err instanceof Error ? err : new Error("invalid JSON"),
-    };
+    });
   }
 
   if (!data.access_token) {
     // 200 OK but no access_token: protocol failure, not auth death.
-    return {
+    return emit({
       ok: false,
       kind: "transient",
       error: new Error("refresh succeeded without access_token"),
-    };
+    });
   }
 
   accessToken = data.access_token;
-  return { ok: true, accessToken: data.access_token };
+  return emit({ ok: true, accessToken: data.access_token });
 }
 
 // Retry budget wrapper. Re-runs refreshAccessTokenOnce up to
@@ -190,13 +239,13 @@ async function refreshAccessTokenOnce(): Promise<RefreshResult> {
 // (network/timeout/5xx/JSON parse/protocol). Terminal 401/403 short-
 // circuits immediately -- those mean the refresh cookie is dead.
 async function refreshAccessToken(): Promise<RefreshResult> {
-  let last: RefreshResult = await refreshAccessTokenOnce();
+  let last: RefreshResult = await refreshAccessTokenOnce(1);
   for (let attempt = 1; attempt <= REFRESH_TRANSIENT_RETRIES; attempt++) {
     if (last.ok || last.kind === "terminal") return last;
     // Exponential backoff: 250ms, 500ms.
     const delay = REFRESH_BACKOFF_BASE_MS * 2 ** (attempt - 1);
     await new Promise<void>((resolve) => setTimeout(resolve, delay));
-    last = await refreshAccessTokenOnce();
+    last = await refreshAccessTokenOnce(attempt + 1);
   }
   return last;
 }
@@ -296,6 +345,7 @@ export async function apiFetch<T>(
 
     if (refreshResult.ok) {
       headers.set("Authorization", `Bearer ${refreshResult.accessToken}`);
+      const retryStartedAt = (typeof performance !== "undefined" ? performance.now() : Date.now());
       res = await fetchWithTimeout(
         `${API_URL}${path}`,
         {
@@ -305,6 +355,19 @@ export async function apiFetch<T>(
         },
         effectiveTimeout,
       );
+      // 2026-05-18 idle-recovery observability: every retry-after-
+      // refresh fires a CustomEvent so prod can confirm the
+      // singleflight handed the new bearer to the original 401'd
+      // request AND the retry actually completed. Without this, a
+      // page-level silent .catch(() => {}) on the original fetcher
+      // would mask retry failures entirely.
+      const retryDurationMs = (typeof performance !== "undefined" ? performance.now() : Date.now()) - retryStartedAt;
+      dispatchAuthEvent<RetryAfterRefreshDetail>("auth:retry-after-refresh", {
+        path,
+        status: res.status,
+        ok: res.ok,
+        durationMs: retryDurationMs,
+      });
       // Retry attempted; fall through to normal !res.ok handling below.
     } else if (refreshResult.kind === "terminal") {
       // Ambiguous-401 defense: before dispatching auth:unauthenticated,
