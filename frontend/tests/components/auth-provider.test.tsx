@@ -329,7 +329,14 @@ describe("AuthProvider", () => {
     );
   });
 
-  it("gives up after 3 transient attempts and renders signed-out", async () => {
+  it("keeps loading=true on persistent transient /auth/refresh", async () => {
+    // Three transient /auth/refresh failures exhausts the retry
+    // budget. The previous behaviour rendered the signed-out tree
+    // (loading=false, user=null), which let AppShell redirect to
+    // /login even though the refresh cookie may still be valid.
+    // 2026-05-18 review fix: keep loading=true so the user sees the
+    // spinner and can reload to retry; do not assume a transient
+    // failure proves the session is dead.
     apiFetchMock
       .mockResolvedValueOnce({ needs_setup: false })
       .mockRejectedValueOnce(new ApiTimeoutError())
@@ -342,24 +349,46 @@ describe("AuthProvider", () => {
       </AuthProvider>,
     );
 
-    await waitFor(() =>
-      expect(screen.getByTestId("loading")).toHaveTextContent("false"),
-    );
+    // Wait until all 4 calls completed (status + 3x refresh).
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(4));
 
+    expect(screen.getByTestId("loading")).toHaveTextContent("true");
     expect(screen.getByTestId("user")).toHaveTextContent("none");
-    // status + 3 refresh attempts = 4 total apiFetch calls.
-    expect(apiFetchMock).toHaveBeenCalledTimes(4);
   });
 
-  it("does not clear accessToken when /auth/me errors transiently after restore", async () => {
-    // After a successful refresh, a transient /auth/me failure used to
-    // null the accessToken — wasting the freshly-minted token and
-    // forcing the next interaction to silently refresh again. The
-    // fixed fetchMe only nulls accessToken on terminal 401/403.
+  it("retries /auth/me on transient timeout during restore", async () => {
+    // /auth/refresh succeeds. /auth/me times out twice then succeeds
+    // on the third attempt. The user must end up signed in — a
+    // single transient failure used to land them at /login.
     apiFetchMock
       .mockResolvedValueOnce({ needs_setup: false })
       .mockResolvedValueOnce({ access_token: "restored-token" })
-      .mockRejectedValueOnce(new ApiTimeoutError());
+      .mockRejectedValueOnce(new ApiTimeoutError())
+      .mockRejectedValueOnce(new ApiTimeoutError())
+      .mockResolvedValueOnce(TEST_USER);
+
+    render(
+      <AuthProvider>
+        <Harness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("user")).toHaveTextContent(TEST_USER.email),
+    );
+    expect(setAccessTokenMock).toHaveBeenCalledWith("restored-token");
+    expect(screen.getByTestId("loading")).toHaveTextContent("false");
+  });
+
+  it("clears accessToken and signs out on terminal /auth/me 401 during restore", async () => {
+    // A terminal 401 from /auth/me after a successful /auth/refresh
+    // means the access token the refresh handed us is being rejected
+    // by /me — treat as real logout: clear access token, set user to
+    // null, allow AppShell to redirect.
+    apiFetchMock
+      .mockResolvedValueOnce({ needs_setup: false })
+      .mockResolvedValueOnce({ access_token: "restored-token" })
+      .mockRejectedValueOnce(new ApiResponseError(401, "no session"));
 
     render(
       <AuthProvider>
@@ -372,10 +401,44 @@ describe("AuthProvider", () => {
     );
 
     expect(screen.getByTestId("user")).toHaveTextContent("none");
-    // setAccessToken called once with the restored token, then NOT
-    // called again with null — the transient /me failure leaves the
-    // session intact.
+    // setAccessToken called twice: once with the restored token, then
+    // with null (terminal /me => proper logout).
+    expect(setAccessTokenMock).toHaveBeenCalledTimes(2);
+    expect(setAccessTokenMock).toHaveBeenNthCalledWith(1, "restored-token");
+    expect(setAccessTokenMock).toHaveBeenNthCalledWith(2, null);
+  });
+
+  it("keeps loading=true on persistent transient /auth/me so AppShell doesn't redirect with a valid token", async () => {
+    // Three transient /auth/me failures exhausts the retry budget.
+    // CRITICAL: loading must STAY true (AppShell renders the spinner)
+    // because we still have a freshly minted access token in memory —
+    // dropping loading=false would let AppShell's `!loading && !user`
+    // redirect fire and bounce the user to /login despite a healthy
+    // session. The user can reload to retry; the access token is
+    // preserved so the reload's silent refresh path is not forced.
+    // 2026-05-18 review fix.
+    apiFetchMock
+      .mockResolvedValueOnce({ needs_setup: false })
+      .mockResolvedValueOnce({ access_token: "restored-token" })
+      .mockRejectedValueOnce(new ApiTimeoutError())
+      .mockRejectedValueOnce(new ApiTimeoutError())
+      .mockRejectedValueOnce(new ApiTimeoutError());
+
+    render(
+      <AuthProvider>
+        <Harness />
+      </AuthProvider>,
+    );
+
+    // Wait until all 5 calls completed (status + refresh + 3x /me).
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(5));
+
+    // accessToken set once with the restored token and NEVER cleared.
     expect(setAccessTokenMock).toHaveBeenCalledTimes(1);
     expect(setAccessTokenMock).toHaveBeenCalledWith("restored-token");
+    // loading is still true so AppShell keeps the spinner up and
+    // does NOT redirect to /login.
+    expect(screen.getByTestId("loading")).toHaveTextContent("true");
+    expect(screen.getByTestId("user")).toHaveTextContent("none");
   });
 });

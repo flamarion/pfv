@@ -106,6 +106,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw lastErr;
     };
 
+    const isTerminalAuth = (err: unknown): boolean =>
+      err instanceof ApiResponseError
+      && (err.status === 401 || err.status === 403);
+
     const restore = async () => {
       try {
         // Check if system needs initial setup
@@ -125,13 +129,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           }),
         );
         setAccessToken(data.access_token);
-        await fetchMe();
-      } catch {
-        // Either no valid session (terminal 401/403) or persistent
-        // transient (all retries exhausted). Either way render the
-        // signed-out tree — the user can reload to retry transient.
-      } finally {
+
+        // Load the user object. Inlined here (rather than calling the
+        // shared fetchMe) so we can use the same retry budget as
+        // /auth/refresh — a transient /me failure on cold start used
+        // to land the user at /login with a valid access token still
+        // in memory. 2026-05-18 review fix.
+        const me = await withRetry(() =>
+          apiFetch<User>("/api/v1/auth/me"),
+        );
+        setUser(me);
         setLoading(false);
+      } catch (err) {
+        if (isTerminalAuth(err)) {
+          // Real logout signal: clear in-memory state and let
+          // AppShell's `!loading && !user` redirect to /login fire.
+          setAccessToken(null);
+          setUser(null);
+          setLoading(false);
+        } else {
+          // Persistent transient (timeout / 5xx / network exhausted
+          // through the retry budget). The access token may still be
+          // valid; clearing it would force a spurious silent refresh
+          // on next interaction AND, more importantly, dropping
+          // loading=false here would let AppShell redirect to /login
+          // even though the session is healthy. Keep loading=true
+          // so the user sees the AppShell spinner and can reload to
+          // retry; the next mount runs restore() afresh against a
+          // (probably) recovered backend.
+        }
       }
     };
     restore();
