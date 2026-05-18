@@ -162,6 +162,87 @@ describe("AuthProvider", () => {
     });
   });
 
+  // ── 2026-05-18 P2 review fix: fetchMe contract on interactive login ──────
+
+  it("login() retries /auth/me on transient timeout and succeeds", async () => {
+    // /login succeeds. /auth/me times out twice then returns the user.
+    // login() resolves and the caller can safely push /dashboard.
+    apiFetchMock
+      .mockResolvedValueOnce({ needs_setup: false })                    // restore /status
+      .mockRejectedValueOnce(new ApiResponseError(401, "no session"))   // restore /refresh terminal
+      .mockResolvedValueOnce({ access_token: "login-token" })           // login POST /login
+      .mockRejectedValueOnce(new ApiTimeoutError())                     // login /me attempt 1
+      .mockRejectedValueOnce(new ApiTimeoutError())                     // login /me attempt 2
+      .mockResolvedValueOnce(TEST_USER);                                // login /me attempt 3
+
+    render(<AuthProvider><Harness /></AuthProvider>);
+    await waitFor(() => expect(screen.getByTestId("loading")).toHaveTextContent("false"));
+    fireEvent.click(screen.getByText("Login"));
+    await waitFor(() => expect(screen.getByTestId("user")).toHaveTextContent(TEST_USER.email));
+    // No error surfaced.
+    expect(screen.getByTestId("error")).toHaveTextContent("none");
+  });
+
+  it("login() rejects on persistent transient /auth/me so caller doesn't push /dashboard with a null user", async () => {
+    // /login succeeds. /auth/me times out 3 times (exhausts the retry
+    // budget). fetchMe rethrows the transient error. login() rejects.
+    // CRITICAL: setUser is NOT called with null (user state untouched)
+    // and setAccessToken is NOT cleared (token may still be valid).
+    // The caller (LoginPageBody) catches and shows an error message
+    // instead of pushing /dashboard — which would have triggered
+    // AppShell's `!loading && !user` redirect back to /login.
+    apiFetchMock
+      .mockResolvedValueOnce({ needs_setup: false })
+      .mockRejectedValueOnce(new ApiResponseError(401, "no session"))
+      .mockResolvedValueOnce({ access_token: "login-token" })
+      .mockRejectedValueOnce(new ApiTimeoutError())
+      .mockRejectedValueOnce(new ApiTimeoutError())
+      .mockRejectedValueOnce(new ApiTimeoutError());
+
+    render(<AuthProvider><Harness /></AuthProvider>);
+    await waitFor(() => expect(screen.getByTestId("loading")).toHaveTextContent("false"));
+    fireEvent.click(screen.getByText("Login"));
+    // login() rejects with ApiTimeoutError → Harness catch sets error.
+    await waitFor(() =>
+      expect(screen.getByTestId("error")).toHaveTextContent("ApiTimeoutError:"),
+    );
+    // User state remained null (initial state); accessToken stayed
+    // SET at "login-token" — fetchMe must NOT have cleared either.
+    expect(screen.getByTestId("user")).toHaveTextContent("none");
+    // setAccessToken sequence: restore /refresh terminal → null,
+    // then login /login → "login-token". fetchMe's persistent
+    // transient handler does NOT call setAccessToken — the last
+    // value must remain "login-token".
+    expect(setAccessTokenMock).toHaveBeenCalledTimes(2);
+    expect(setAccessTokenMock).toHaveBeenLastCalledWith("login-token");
+  });
+
+  it("login() rejects on terminal /auth/me 401 AND clears accessToken (real auth death)", async () => {
+    // /login returned an access_token that /auth/me immediately
+    // rejects with 401. Treat as terminal: clear accessToken + user,
+    // rethrow. The login flow aborts; the caller's catch shows an
+    // error.
+    apiFetchMock
+      .mockResolvedValueOnce({ needs_setup: false })
+      .mockRejectedValueOnce(new ApiResponseError(401, "no session"))
+      .mockResolvedValueOnce({ access_token: "login-token" })
+      .mockRejectedValueOnce(new ApiResponseError(401, "user inactive"));
+
+    render(<AuthProvider><Harness /></AuthProvider>);
+    await waitFor(() => expect(screen.getByTestId("loading")).toHaveTextContent("false"));
+    fireEvent.click(screen.getByText("Login"));
+    await waitFor(() =>
+      expect(screen.getByTestId("error")).toHaveTextContent("ApiResponseError:user inactive"),
+    );
+    expect(screen.getByTestId("user")).toHaveTextContent("none");
+    // setAccessToken sequence: restore /refresh terminal → null,
+    // login /login → "login-token", terminal /me → null.
+    expect(setAccessTokenMock).toHaveBeenCalledTimes(3);
+    expect(setAccessTokenMock).toHaveBeenNthCalledWith(1, null);
+    expect(setAccessTokenMock).toHaveBeenNthCalledWith(2, "login-token");
+    expect(setAccessTokenMock).toHaveBeenNthCalledWith(3, null);
+  });
+
   it("surfaces MFA challenges to the caller", async () => {
     apiFetchMock
       .mockResolvedValueOnce({ needs_setup: false })

@@ -22,6 +22,48 @@ export class MfaRequiredError extends Error {
   }
 }
 
+// 2026-05-18 session-stability helpers — shared between restore() (mount)
+// and fetchMe() (interactive login, SSO callback, invite accept, settings
+// pages via refreshMe). Both paths need the same retry budget and the
+// same terminal-vs-transient discrimination so a cold-start /auth/me
+// blip never lands the user at /login with a valid access token still
+// in memory.
+
+const isTransientAuthError = (err: unknown): boolean => {
+  if (err instanceof ApiTimeoutError) return true;
+  if (err instanceof ApiResponseError) {
+    // 401/403 = terminal (real session-dead signal). Everything else
+    // (5xx, 503 refresh_transient, 0 network) is worth a retry on
+    // cold start.
+    return err.status === 0 || err.status >= 500;
+  }
+  // TypeError on fetch (DNS, offline) lands here.
+  return true;
+};
+
+const isTerminalAuthError = (err: unknown): boolean =>
+  err instanceof ApiResponseError
+  && (err.status === 401 || err.status === 403);
+
+async function withAuthRetry<T>(fn: () => Promise<T>): Promise<T> {
+  // 3 attempts; backoff 250ms, 500ms. Matches apiFetch's
+  // REFRESH_TRANSIENT_RETRIES budget so the recovery story is
+  // consistent across the silent-refresh path, the mount path,
+  // and every interactive-login current-user load.
+  const delays = [0, 250, 500];
+  let lastErr: unknown;
+  for (const delay of delays) {
+    if (delay) await new Promise((r) => setTimeout(r, delay));
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientAuthError(err)) throw err;
+    }
+  }
+  throw lastErr;
+}
+
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
@@ -47,73 +89,50 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [needsSetup, setNeedsSetup] = useState(false);
 
   const fetchMe = useCallback(async () => {
+    // 2026-05-18 review fix: fetchMe is the shared current-user load
+    // for interactive login, SSO callback, invite accept, and the
+    // settings pages (via the `refreshMe` alias). Previously a
+    // transient /auth/me failure silently set user=null and resolved,
+    // which let the login flow push /dashboard with no user object;
+    // AppShell then bounced back to /login with a perfectly valid
+    // access token still in memory.
+    //
+    // After this fix:
+    //   * Transient (timeout / 5xx / network) is retried 3× through
+    //     withAuthRetry; if it eventually succeeds, user is set.
+    //   * Persistent transient leaves user AND accessToken untouched
+    //     and rethrows so the caller (login / SSO / invite / setting
+    //     handler) knows to NOT proceed with a happy-path redirect.
+    //     The caller's own try/catch surfaces an error to the UI; the
+    //     user stays on the current screen and can retry.
+    //   * Terminal 401/403 clears in-memory state (real logout) AND
+    //     rethrows so the caller still aborts its happy-path flow;
+    //     AppShell's redirect-on-mount handles routing to /login.
     try {
-      const u = await apiFetch<User>("/api/v1/auth/me");
+      const u = await withAuthRetry(() => apiFetch<User>("/api/v1/auth/me"));
       setUser(u);
     } catch (err) {
-      // Only treat a 401/403 from /auth/me as actual logout. A
-      // transient timeout, network error, or 5xx leaves accessToken
-      // alone so the next interaction can retry against the same
-      // valid session — clearing it would trigger a spurious silent
-      // refresh and (under family-revoke semantics) needlessly rotate
-      // a healthy cookie.
-      if (
-        err instanceof ApiResponseError
-        && (err.status === 401 || err.status === 403)
-      ) {
+      if (isTerminalAuthError(err)) {
         setUser(null);
         setAccessToken(null);
-      } else {
-        setUser(null);
       }
+      // Persistent transient: state untouched. Rethrow so the caller
+      // can react (e.g. login() rejects → LoginPageBody.catch shows
+      // an error → router.push("/dashboard") never fires).
+      throw err;
     }
   }, []);
 
   useEffect(() => {
     // Cold-start transient errors during restore (status timed out,
     // refresh hit a 5xx, /me network blip) used to drop the user
-    // straight to /login. Wrap the calls in a small retry budget
-    // matched to apiFetch's own transient classifier — terminal
-    // 401/403 from /auth/refresh still falls through immediately so
-    // a real logged-out user is not stuck waiting.
-    const isTransient = (err: unknown): boolean => {
-      if (err instanceof ApiTimeoutError) return true;
-      if (err instanceof ApiResponseError) {
-        // 401/403 = terminal (real session-dead signal). Everything
-        // else (5xx, 503 refresh_transient, 0 network) is worth a
-        // retry on cold start.
-        return err.status === 0 || err.status >= 500;
-      }
-      // TypeError on fetch (DNS, offline) lands here.
-      return true;
-    };
-
-    const withRetry = async <T,>(fn: () => Promise<T>): Promise<T> => {
-      // 3 attempts; backoff 250ms, 500ms. Matches apiFetch's
-      // REFRESH_TRANSIENT_RETRIES budget so the recovery story is
-      // consistent across the silent-refresh path and the mount path.
-      const delays = [0, 250, 500];
-      let lastErr: unknown;
-      for (const delay of delays) {
-        if (delay) await new Promise((r) => setTimeout(r, delay));
-        try {
-          return await fn();
-        } catch (err) {
-          lastErr = err;
-          if (!isTransient(err)) throw err;
-        }
-      }
-      throw lastErr;
-    };
-
-    const isTerminalAuth = (err: unknown): boolean =>
-      err instanceof ApiResponseError
-      && (err.status === 401 || err.status === 403);
-
+    // straight to /login. Calls go through the shared withAuthRetry
+    // helper hoisted to module scope so restore() and fetchMe() share
+    // exactly one retry / classification contract.
     const restore = async () => {
       try {
         // Check if system needs initial setup
-        const status = await withRetry(() =>
+        const status = await withAuthRetry(() =>
           apiFetch<{ needs_setup: boolean }>("/api/v1/auth/status"),
         );
         if (status.needs_setup) {
@@ -123,25 +142,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
 
         // Try silent refresh to restore session
-        const data = await withRetry(() =>
+        const data = await withAuthRetry(() =>
           apiFetch<TokenResponse>("/api/v1/auth/refresh", {
             method: "POST",
           }),
         );
         setAccessToken(data.access_token);
 
-        // Load the user object. Inlined here (rather than calling the
-        // shared fetchMe) so we can use the same retry budget as
-        // /auth/refresh — a transient /me failure on cold start used
-        // to land the user at /login with a valid access token still
-        // in memory. 2026-05-18 review fix.
-        const me = await withRetry(() =>
+        // Load the user object with the same retry budget. Inlined
+        // (rather than calling fetchMe()) because restore needs the
+        // success/terminal/transient outcomes to drive its own
+        // loading-state contract, which differs from fetchMe's
+        // throw-on-failure contract.
+        const me = await withAuthRetry(() =>
           apiFetch<User>("/api/v1/auth/me"),
         );
         setUser(me);
         setLoading(false);
       } catch (err) {
-        if (isTerminalAuth(err)) {
+        if (isTerminalAuthError(err)) {
           // Real logout signal: clear in-memory state and let
           // AppShell's `!loading && !user` redirect to /login fire.
           setAccessToken(null);
@@ -161,7 +180,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     };
     restore();
-  }, [fetchMe]);
+  }, []);
 
   // Listen for terminal 401s dispatched by apiFetch so we clear React state
   // and AppShell can redirect the user to /login instead of spinning forever.
