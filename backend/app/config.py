@@ -34,10 +34,14 @@ class Settings(BaseSettings):
     # RTO, which is the actual mechanism behind the 46 s "(canceled)"
     # /refresh hang signature.
     #
+    # connect_timeout sized for first-connect under cold-start
+    # network conditions where a transient VPC blip can extend the
+    # handshake by a few seconds — too tight breaks legitimate
+    # slow connects without buying back any user-visible latency.
     # read_timeout / write_timeout apply per-packet, not per-query,
     # so a legitimately long-running query that streams data is not
     # affected — only stalls on a dead socket are bounded.
-    db_connect_timeout: int = 5
+    db_connect_timeout: int = 10
     db_read_timeout: int = 30
     db_write_timeout: int = 30
 

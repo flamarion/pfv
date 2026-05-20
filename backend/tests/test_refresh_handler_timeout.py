@@ -116,11 +116,11 @@ class TestRefreshHandlerTimeout:
         for an expired refresh token, 503 for Redis-down, etc.) must
         propagate unchanged. The timeout wrapper must NOT catch them
         and convert them to its own 503."""
-        import app.config as cfg
         import app.routers.auth as auth_mod
         from fastapi import HTTPException, status
 
-        monkeypatch.setattr(cfg.settings, "refresh_handler_timeout_s", 5.0)
+        # See sibling test for why this targets ``auth_mod.app_settings``.
+        monkeypatch.setattr(auth_mod.app_settings, "refresh_handler_timeout_s", 5.0)
 
         async def reject_401(*args, **kwargs):
             raise HTTPException(
@@ -139,3 +139,36 @@ class TestRefreshHandlerTimeout:
 
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
         assert exc_info.value.detail == "Invalid refresh token"
+
+    @pytest.mark.asyncio
+    async def test_refresh_passes_through_unexpected_exception(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unexpected exception (e.g. a real programmer bug, NOT a
+        TimeoutError, NOT an HTTPException) must propagate unchanged so
+        it surfaces as a 500 with a complete traceback in logs. The
+        timeout wrapper must NOT swallow it and convert to a 503 —
+        that would mask the actual bug under a misleading
+        Redis-unavailable detail."""
+        import app.routers.auth as auth_mod
+
+        # See sibling test for why this targets ``auth_mod.app_settings``.
+        monkeypatch.setattr(auth_mod.app_settings, "refresh_handler_timeout_s", 5.0)
+
+        class ProgrammerBug(Exception):
+            pass
+
+        async def boom(*args, **kwargs):
+            raise ProgrammerBug("list index out of range")
+
+        with patch.object(auth_mod, "_refresh_impl", boom):
+            with pytest.raises(ProgrammerBug) as exc_info:
+                await auth_mod.refresh(
+                    request=None,  # type: ignore[arg-type]
+                    response=None,  # type: ignore[arg-type]
+                    db=None,  # type: ignore[arg-type]
+                    session_factory=None,  # type: ignore[arg-type]
+                )
+
+        assert "list index out of range" in str(exc_info.value)
