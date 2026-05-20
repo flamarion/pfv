@@ -117,3 +117,24 @@ async def test_bulk_delete_transactions_on_transfer_pair_no_circular_dependency(
         select(Transaction).where(Transaction.id.in_([expense.id, income.id]))
     )
     assert remaining.all() == []
+
+
+async def test_delete_transaction_with_asymmetric_link_does_not_orphan(db_session):
+    """Asymmetric FK case: only one half of the pair carries
+    ``linked_transaction_id`` pointing at the other; the back-pointer
+    is ``NULL``. The model allows it, and after a data-migration or
+    partial import it can show up in the wild. Deleting the side
+    that still carries the FK must cascade through the service's
+    ``linked_tx`` lookup, complete without raising, and leave no
+    orphan row."""
+    org, src, dst, expense, income = await _seed_pair(db_session)
+    # Break the back-pointer: income no longer references expense.
+    income.linked_transaction_id = None
+    await db_session.commit()
+
+    await transaction_service.delete_transaction(db_session, org.id, expense.id)
+
+    remaining = await db_session.scalars(
+        select(Transaction).where(Transaction.id.in_([expense.id, income.id]))
+    )
+    assert remaining.all() == []
