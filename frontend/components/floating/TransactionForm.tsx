@@ -3,6 +3,7 @@
 import { FormEvent, MouseEvent, useEffect, useRef, useState } from "react";
 
 import DescriptionAutocomplete from "@/components/transactions/DescriptionAutocomplete";
+import TagChipInput from "@/components/transactions/TagChipInput";
 import CategorySelect from "@/components/ui/CategorySelect";
 import { apiFetch, extractErrorMessage } from "@/lib/api";
 import { todayISO } from "@/lib/format";
@@ -13,7 +14,7 @@ import {
   input,
   label,
 } from "@/lib/styles";
-import type { Account, Category } from "@/lib/types";
+import type { Account, Category, Transaction } from "@/lib/types";
 
 /**
  * Quick-entry transaction form used inside the AppShell-level Add
@@ -99,6 +100,11 @@ export default function TransactionForm({
   // credit-card-style settlement lag a deliberate choice instead of
   // silently inheriting the transaction date.
   const [settledDate, setSettledDate] = useState("");
+  // PR-Tags-A: chip-managed tag set. Normalized lowercase names. The
+  // backend auto-creates new tags via PUT /api/v1/transactions/{id}/tags
+  // (called right after the POST below) so the user does not need to
+  // pre-create tags from a management page.
+  const [tags, setTags] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [errMsg, setErrMsg] = useState("");
   // Focus target for the "Save and add new" refocus path. The
@@ -148,6 +154,8 @@ export default function TransactionForm({
     // fresh. Status default re-derives from the (preserved) account on
     // its own, so we leave that alone.
     setSettledDate("");
+    // Tags are per-transaction, not sticky across entries.
+    setTags([]);
     setErrMsg("");
   }
 
@@ -165,7 +173,7 @@ export default function TransactionForm({
     setSubmitting(true);
     setErrMsg("");
     try {
-      await apiFetch("/api/v1/transactions", {
+      const created = await apiFetch<Transaction>("/api/v1/transactions", {
         method: "POST",
         body: JSON.stringify({
           account_id: accountId,
@@ -183,6 +191,16 @@ export default function TransactionForm({
             : {}),
         }),
       });
+      // Attach tags as a separate PUT now that the transaction exists.
+      // Backend auto-creates any unknown tags and enforces the
+      // MAX_TAGS_PER_TRANSACTION cap (defense in depth — client also
+      // caps in TagChipInput).
+      if (tags.length > 0 && created?.id) {
+        await apiFetch(`/api/v1/transactions/${created.id}/tags`, {
+          method: "PUT",
+          body: JSON.stringify({ tag_names: tags }),
+        });
+      }
       onTransactionAdded?.();
       if (addAnother) {
         clearForm();
@@ -313,6 +331,19 @@ export default function TransactionForm({
           placeholder="What was it for?"
           required
           ariaLabel="Description"
+        />
+      </div>
+
+      <div>
+        <label htmlFor="fab-tx-tags" className={label}>
+          Tags
+        </label>
+        <TagChipInput
+          id="fab-tx-tags"
+          value={tags}
+          onChange={setTags}
+          categoryId={categoryId}
+          disabled={submitting}
         />
       </div>
 
