@@ -18,6 +18,7 @@ import asyncio
 import functools
 import json
 import logging
+import time as _time
 from typing import Any, Awaitable, Callable, TypeVar
 
 from redis.asyncio import Redis
@@ -112,9 +113,31 @@ def _normalize_transport_errors(fn: _F) -> _F:
     """
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        # Breadcrumbs around the wrapped call let operators pin which
+        # specific Redis op a /refresh handler was inside when it hung.
+        # Gated by ``settings.auth_debug_logging`` so production stays
+        # quiet under normal operation. Local import avoids the
+        # ``app.config`` cycle this module's import order can introduce.
+        from app.config import settings as _settings  # noqa: PLC0415
+        debug = _settings.auth_debug_logging
+        op_name = fn.__name__
+        start = _time.perf_counter() if debug else 0.0
+        if debug:
+            logger.info("redis.call.start", extra={"op": op_name})
         try:
-            return await fn(*args, **kwargs)
-        except RedisError:
+            result = await fn(*args, **kwargs)
+        except RedisError as exc:
+            if debug:
+                logger.info(
+                    "redis.call.error",
+                    extra={
+                        "op": op_name,
+                        "duration_ms": round(
+                            (_time.perf_counter() - start) * 1000, 1
+                        ),
+                        "error_class": exc.__class__.__name__,
+                    },
+                )
             # ResponseError, ConnectionError, TimeoutError, etc. — already
             # a sensible Redis-domain exception. Pass through so the
             # caller's ``except (RedisRequired, RedisError)`` runs AND so
@@ -126,6 +149,17 @@ def _normalize_transport_errors(fn: _F) -> _F:
             # through so the caller's existing handler logic runs.
             raise
         except OSError as exc:
+            if debug:
+                logger.info(
+                    "redis.call.error",
+                    extra={
+                        "op": op_name,
+                        "duration_ms": round(
+                            (_time.perf_counter() - start) * 1000, 1
+                        ),
+                        "error_class": exc.__class__.__name__,
+                    },
+                )
             # Socket-level I/O. Translate to RedisConnectionError so the
             # router's existing 503 fallback kicks in — AND retire the
             # poisoned pool so the next call uses a fresh connection.
@@ -138,6 +172,17 @@ def _normalize_transport_errors(fn: _F) -> _F:
             ) from exc
         except RuntimeError as exc:
             if _looks_like_dead_transport(exc):
+                if debug:
+                    logger.info(
+                        "redis.call.error",
+                        extra={
+                            "op": op_name,
+                            "duration_ms": round(
+                                (_time.perf_counter() - start) * 1000, 1
+                            ),
+                            "error_class": exc.__class__.__name__,
+                        },
+                    )
                 # Same as above: poisoned-pool retirement BEFORE the
                 # router's caller hits the next helper. Without this,
                 # the frontend's reactive retry would hit the same
@@ -155,6 +200,17 @@ def _normalize_transport_errors(fn: _F) -> _F:
             # Unrelated RuntimeError — almost certainly a real bug.
             # Let it escape so it surfaces as 500 with full traceback.
             raise
+        if debug:
+            logger.info(
+                "redis.call.ok",
+                extra={
+                    "op": op_name,
+                    "duration_ms": round(
+                        (_time.perf_counter() - start) * 1000, 1
+                    ),
+                },
+            )
+        return result
 
     return wrapper  # type: ignore[return-value]
 
